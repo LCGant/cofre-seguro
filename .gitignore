@@ -1,0 +1,39 @@
+# Ambientes virtuais
+.venv/
+venv/
+env/
+ENV/
+
+# Cache e arquivos compilados do Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Ferramentas de desenvolvimento
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Arquivos de ambiente
+.env
+.env.*
+
+# IDEs e sistema operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Dados locais e segredos do projeto
+cofre_seguro_dados.json
+backup_cofre_seguro*.json
+cofre_seguro*.key
+*.pem
+*.p12

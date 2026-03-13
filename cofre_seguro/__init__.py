@@ -1,0 +1,1 @@
+"""Pacote do projeto Cofre de Senhas Seguro."""
