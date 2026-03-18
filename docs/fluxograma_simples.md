@@ -3,6 +3,7 @@
 Fluxograma de visão geral do projeto **Cofre de Senhas Seguro**.
 
 ```mermaid
+
 flowchart TD
     A[Início da aplicação] --> B[main.py inicializa armazenamento e serviço]
     B --> C{Já existe cofre?}
@@ -28,10 +29,12 @@ flowchart TD
     N --> P[Cadastrar, editar e excluir]
     N --> Q[Revelar ou copiar senha]
     N --> R[Exportar, importar ou fortalecer cofre]
-    O --> S[Sair]
-    P --> S
-    Q --> S
-    R --> S
+    N --> S[Sair]
+    O --> N
+    P --> N
+    Q --> N
+    R --> N
+    
     S --> T[Encerrar sessão]
     T --> U[Fim]
 ```
