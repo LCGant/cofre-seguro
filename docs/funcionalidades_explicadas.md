@@ -4,6 +4,85 @@ Guia completo de cada funcionalidade do projeto, onde esta no codigo e como func
 
 ---
 
+## NOVIDADES DA VERSAO ATUAL (resumo)
+
+A interface foi totalmente redesenhada e o servico ganhou suporte a multiplos tipos de itens.
+O fluxo central (criacao, login, criptografia AES-256-GCM + Argon2id) **continua o mesmo** — as
+secoes 1 a 4 deste documento ainda descrevem corretamente a inicializacao, criacao e login.
+
+### O que mudou desde o redesign
+
+**Multiplos tipos de itens** (`vault.py`)
+- O cofre agora guarda 6 tipos: `senha`, `cartao`, `documento`, `nota`, `wifi`, `licenca`
+- Cada tipo tem seus proprios campos editaveis (definidos em `CAMPOS_EDITAVEIS_POR_TIPO`)
+- Cada tipo tem campos sensiveis proprios (em `CAMPOS_SENSIVEIS_POR_TIPO`) que ficam mascarados
+- API generica nova: `listar_itens()`, `adicionar_item()`, `editar_item()`, `excluir_item()`,
+  `obter_item()`, `revelar_campo()`, `alternar_favorito()`, `contar_por_tipo()`
+- API legada (`listar_credenciais`, `adicionar_credencial`, etc) mantida para compatibilidade
+
+**Visual moderno com `ttkbootstrap`** (`gui.py`)
+- Paleta propria estilo GitHub Dark (definida em `PALETA_ESCURA` / `PALETA_CLARA`)
+- Tema escuro por padrao, alternavel para tema claro com `Ctrl+T`
+- Tela split (hero decorativo + formulario) na criacao e login
+- Indicador de forca de senha em tempo real com cor (vermelho → verde)
+- Faixa de acento colorida no topo da janela (decorativa)
+
+**Tela principal redesenhada** (`TelaPrincipal` em `gui.py`)
+- **Sidebar** com 8 filtros: Todos, Favoritos + os 6 tipos. Cada item ativo destaca com a
+  cor do tipo no texto + barra indicadora colorida + fundo elevado
+- **Dashboard de stats** no topo: 6 tiles clicaveis com contagem por tipo e cor de identidade
+- **Busca global** estilo barra com icone, atalho `Ctrl+F`
+- **Cards** com badge colorido contendo o icone, divisor sutil, rotulo do tipo embaixo do
+  titulo, e botao de "copiar usuario / SSID / e-mail" direto no card (sem precisar abrir detalhes)
+- **Estado vazio** rico: badge circular gigante na cor do tipo, sugestoes de uso, botao
+  "Adicionar agora" e dica do atalho
+- **Scrollbar auto-hide**: so aparece quando ha mais conteudo do que cabe na tela
+- **Scroll reseta ao topo** a cada troca de filtro (evita cards "sumidos")
+
+**Diálogos repaginados**
+- Formulario de novo/editar item: header colorido com a cor do tipo, seletor visual de tipo
+  (grid de 6 botoes coloridos), campos uppercase estilo "label", barra de forca de senha
+  durante o cadastro, gerador de senha integrado (botao ✨)
+- Detalhes do item: cabecalho colorido + cards de cada campo com botoes 👁 (revelar)
+  e 📋 (copiar). **Revelar nao pede mais a senha mestra** — sessao ja autenticada
+- Gerador de senhas (`Ctrl+G`): caixa de senha em destaque, slider para tamanho, toggles
+  para classes de caracteres (maiusculas, minusculas, numeros, especiais)
+- Configuracoes (`Ctrl+,`): notebook com 3 abas — Seguranca (trocar senha mestra/keyfile),
+  Exportar/Importar, Informacoes do cofre
+
+**Atalhos de teclado (`F1` mostra o guia completo)**
+- `Ctrl+N` → novo item
+- `Ctrl+F` → focar busca (Esc dentro limpa)
+- `Ctrl+L` → bloquear cofre (logout)
+- `Ctrl+T` → alternar tema escuro/claro
+- `Ctrl+,` → configuracoes
+- `Ctrl+G` → gerador de senhas
+- `Ctrl+0` → mostrar todos / `Ctrl+1..6` → filtrar por tipo
+- `Ctrl+Shift+F` → so favoritos
+- `F5` → recarregar lista
+- `F1` → janela com todos os atalhos
+- Em formularios: `Ctrl+S` salva, `Esc` cancela, `Ctrl+Z/Y/A/C/V/X` em campos de texto
+- Em detalhes: `Ctrl+E` editar, `Delete` excluir
+
+**Mouse**
+- Roda do mouse: rolagem normal
+- **Botao do meio + arrastar**: scroll-drag estilo visualizador de PDF (cursor vira ✥)
+- Funciona em todas as listas e modais
+
+**Seguranca aplicada na UI**
+- **Bloqueio automatico apos 5 minutos** sem atividade (qualquer clique ou tecla reseta o timer)
+- **Limpeza automatica do clipboard** 30 segundos apos copiar valor sensivel
+- **Re-renderizacao da tela atual** ao trocar tema (preserva autenticacao em vez de voltar pro login)
+
+**Otimizacoes internas** (`vault.py`)
+- **Cache em memoria** do arquivo do cofre — evita reler o JSON do disco a cada chamada
+  da UI (`obter_resumo_seguranca`, `cofre_requer_keyfile`, etc). Invalidado em todas as
+  escritas via wrapper `_salvar_arquivo`
+- Helper `_aplicar_migracao_legada` extrai a unica fonte de verdade da migracao de cofres
+  antigos (campo `servico` → `titulo`, default de `tipo` e `favorito`)
+
+---
+
 ## 1. INICIALIZACAO DO PROGRAMA
 
 **Arquivo:** `main.py` (linha 47)

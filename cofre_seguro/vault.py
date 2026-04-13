@@ -116,6 +116,10 @@ class ServicoCofre:
         """Inicializa o serviço com o gerenciador de persistência local."""
         # Guarda o gerenciador que sabe ler e gravar o arquivo do cofre
         self._armazenamento = armazenamento
+        # Cache do conteúdo do arquivo de cofre — evita reler o JSON do disco
+        # toda vez que a UI consulta resumo de segurança, status do keyfile, etc.
+        # Invalidado em todas as escritas (_salvar_arquivo) e ao trocar de cofre.
+        self._cache_arquivo: dict[str, Any] | None = None
         # Chave de criptografia da sessão atual (None = ninguém fez login ainda)
         self._chave_sessao: bytes | None = None
         # Dados do cofre descriptografados na memória (None = não carregado ainda)
@@ -251,7 +255,7 @@ class ServicoCofre:
             },
         )
         # Salva tudo no arquivo do cofre
-        self._armazenamento.salvar(estrutura_arquivo)
+        self._salvar_arquivo(estrutura_arquivo)
 
     # Tenta fazer login no cofre com senha e, opcionalmente, keyfile
     def tentar_login(
@@ -348,7 +352,7 @@ class ServicoCofre:
             # Se não houve migração, apenas atualiza a data e salva
             if not migrado:
                 dados_arquivo.setdefault("metadados", {})["atualizado_em"] = self._agora_iso()
-                self._armazenamento.salvar(dados_arquivo)
+                self._salvar_arquivo(dados_arquivo)
 
             # Mensagem padrão de sucesso
             mensagem = "Login realizado com sucesso."
@@ -409,7 +413,7 @@ class ServicoCofre:
 
         # Atualiza a data de modificação e salva o arquivo com as novas informações de controle
         dados_arquivo.setdefault("metadados", {})["atualizado_em"] = self._agora_iso()
-        self._armazenamento.salvar(dados_arquivo)
+        self._salvar_arquivo(dados_arquivo)
 
         # Retorna resultado de falha com informações de atraso e bloqueio
         return ResultadoLogin(
@@ -1028,7 +1032,7 @@ class ServicoCofre:
             metadados_arquivo=metadados_arquivo,
         )
         # Salva o arquivo com as novas configurações
-        self._armazenamento.salvar(estrutura_arquivo)
+        self._salvar_arquivo(estrutura_arquivo)
 
         # Atualiza a sessão com a nova chave e keyfile
         self._chave_sessao = chave_criptografia
@@ -1079,6 +1083,9 @@ class ServicoCofre:
         self._dados_cofre = None
         self._chave_sessao = None
         self._segredo_keyfile_sessao = None
+        # Invalida o cache do arquivo: próxima sessão pode ser cofre diferente
+        # (importante quando o usuário troca de cofre via --arquivo)
+        self._cache_arquivo = None
 
     # ========================================================================
     # Métodos internos (privados) — usados apenas dentro desta classe
@@ -1105,7 +1112,7 @@ class ServicoCofre:
         # Atualiza a data de modificação do arquivo
         dados_arquivo.setdefault("metadados", {})["atualizado_em"] = agora
         # Salva o arquivo atualizado no disco
-        self._armazenamento.salvar(dados_arquivo)
+        self._salvar_arquivo(dados_arquivo)
 
     # Descriptografa os dados do cofre, tratando formato atual e legado
     def _abrir_carga_criptografada(
@@ -1181,7 +1188,7 @@ class ServicoCofre:
             metadados_arquivo=metadados_arquivo,
         )
         # Salva o arquivo atualizado no disco
-        self._armazenamento.salvar(estrutura_arquivo)
+        self._salvar_arquivo(estrutura_arquivo)
         # Atualiza a chave da sessão para a nova chave
         self._chave_sessao = chave_criptografia
         # Retorna True indicando que a migração foi feita
@@ -1293,23 +1300,32 @@ class ServicoCofre:
             return tipo_bruto
         return "senha"
 
-    # Normaliza um item bruto para o formato padrão moderno
-    # Garante que tem campo "tipo", "favorito", "titulo" (no caso de campo legado "servico")
+    # Aplica IN-PLACE as migrações de campos legados num único item
+    # (campo "tipo", "titulo" a partir de "servico", default "favorito"=False).
+    # Helper compartilhado entre _normalizar_item (cópia) e _normalizar_estrutura_cofre
+    # (in-place no carregamento), pra ter UMA fonte da verdade da migração.
+    def _aplicar_migracao_legada(self, item: dict[str, Any]) -> None:
+        """Aplica regras de migração de cofres antigos diretamente no item."""
+        # Se o tipo não está presente ou é inválido, força "senha"
+        if "tipo" not in item or self._resolver_tipo(item) != item.get("tipo"):
+            item["tipo"] = self._resolver_tipo(item)
+        # Migra campo legado "servico" → "titulo" (sem apagar o "servico")
+        if "titulo" not in item and "servico" in item:
+            item["titulo"] = item["servico"]
+        # Garante campo de favorito presente
+        item.setdefault("favorito", False)
+
+    # Normaliza um item bruto retornando uma CÓPIA com campos padronizados
+    # Não muda o original — usado por listar_itens / obter_item
     def _normalizar_item(self, item: dict[str, Any]) -> dict[str, Any]:
-        """Garante que o item tem os campos padronizados (tipo, titulo, favorito)."""
-        # Cria uma cópia para não mexer no original
+        """Retorna cópia normalizada do item, com tipo/titulo/favorito garantidos."""
+        # Cria cópia rasa para não mexer no original
         normalizado = dict(item)
-        # Resolve o tipo (aceita item legado sem campo "tipo")
-        normalizado["tipo"] = self._resolver_tipo(item)
-        # Se não tem "titulo" mas tem campo legado "servico", migra
-        if "titulo" not in normalizado and "servico" in normalizado:
-            normalizado["titulo"] = normalizado["servico"]
-        # Garante que tem o campo favorito (padrão: False)
-        normalizado.setdefault("favorito", False)
-        # Garante que tem os campos editáveis daquele tipo (ainda que vazios)
+        # Aplica migrações na cópia
+        self._aplicar_migracao_legada(normalizado)
+        # Garante que todos os campos editáveis daquele tipo existem (vazios se nada)
         for campo in CAMPOS_EDITAVEIS_POR_TIPO[normalizado["tipo"]]:
             normalizado.setdefault(campo, "")
-        # Retorna a versão normalizada
         return normalizado
 
     # Remove os campos sensíveis de um item para exibição na lista
@@ -1406,6 +1422,7 @@ class ServicoCofre:
             raise PermissionError("É necessário fazer login para acessar o cofre.")
 
     # Garante que a estrutura interna do cofre tenha os campos mínimos
+    # E que cada item esteja com a migração legada aplicada (in-place).
     def _normalizar_estrutura_cofre(self) -> None:
         """Normaliza estrutura interna mínima do cofre descriptografado."""
         # Se não existe a lista de itens, cria uma vazia
@@ -1418,16 +1435,9 @@ class ServicoCofre:
                 "atualizado_em": self._agora_iso(),
             },
         )
-        # Normaliza cada item: garante campo "tipo", "favorito", "titulo"
+        # Aplica migração legada in-place em cada item (UMA fonte da verdade)
         for item in self._dados_cofre["credenciais"]:
-            # Se não tem tipo, assume "senha"
-            if "tipo" not in item:
-                item["tipo"] = "senha"
-            # Se não tem "titulo" mas tem "servico" (campo legado), copia
-            if "titulo" not in item and "servico" in item:
-                item["titulo"] = item["servico"]
-            # Garante campo "favorito"
-            item.setdefault("favorito", False)
+            self._aplicar_migracao_legada(item)
 
     # Carrega o conteúdo de um keyfile do disco e retorna o segredo normalizado
     def _carregar_segredo_keyfile(self, caminho_keyfile: str) -> bytes:
@@ -1449,8 +1459,14 @@ class ServicoCofre:
         return not isinstance(dados_arquivo.get("dados_cofre_criptografados"), dict)
 
     # Carrega o arquivo do cofre e valida se todos os campos obrigatórios estão presentes
+    # Usa cache em memória para evitar reler o JSON do disco a cada chamada
+    # (a UI consulta isso várias vezes por segundo em telas de bloqueio/login)
     def _carregar_arquivo_obrigatorio(self) -> dict[str, Any]:
-        """Carrega arquivo persistido e valida campos críticos obrigatórios."""
+        """Carrega arquivo persistido com cache; valida campos críticos."""
+        # Se já temos em cache, devolve direto (sem I/O)
+        if self._cache_arquivo is not None:
+            return self._cache_arquivo
+
         dados_arquivo = self._armazenamento.carregar()
         if dados_arquivo is None:
             raise FileNotFoundError("Cofre ainda não foi inicializado.")
@@ -1466,7 +1482,17 @@ class ServicoCofre:
         if faltantes:
             raise ValueError(f"Arquivo do cofre incompleto: faltando {', '.join(faltantes)}.")
 
+        # Guarda no cache para próximas leituras desta sessão
+        self._cache_arquivo = dados_arquivo
         return dados_arquivo
+
+    # Wrapper de escrita que SEMPRE invalida o cache antes/depois
+    # Use este método em vez de chamar self._armazenamento.salvar diretamente
+    def _salvar_arquivo(self, dados_arquivo: dict[str, Any]) -> None:
+        """Salva no disco e atualiza o cache para refletir o novo conteúdo."""
+        self._armazenamento.salvar(dados_arquivo)
+        # O dict salvo é o novo conteúdo do disco; vira o cache atual
+        self._cache_arquivo = dados_arquivo
 
     # Carrega e valida um arquivo de exportação de credenciais
     @staticmethod
