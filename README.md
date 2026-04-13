@@ -2,33 +2,47 @@
 
 Projeto acadêmico desenvolvido para a disciplina de **Programação de Computadores**.
 
-O sistema implementa um cofre de senhas local em Python com interface gráfica em Tkinter, autenticação por senha mestra, criptografia dos dados em disco e recursos de gerenciamento de credenciais.
+O sistema implementa um cofre local em Python com interface gráfica moderna usando `ttkbootstrap`, autenticação por senha mestra, criptografia dos dados em disco e gerenciamento de **seis tipos de itens**: senhas, cartões, documentos, notas seguras, redes Wi-Fi e licenças de software.
 
 ## Objetivo
 
 O objetivo do projeto é demonstrar a construção de uma aplicação desktop local com:
 
-- interface gráfica em `Tkinter`
+- interface gráfica moderna em `Tkinter + ttkbootstrap` (tema escuro/claro)
 - organização modular do código
 - persistência em arquivo local
 - proteção de dados sensíveis com criptografia
 - autenticação com mitigação contra tentativas repetidas de acesso
+- suporte a múltiplos tipos de itens protegidos
+
+## Tipos de itens suportados
+
+| Tipo        | Ícone | Campos principais                                              |
+|-------------|:-----:|----------------------------------------------------------------|
+| Senha       | 🔒    | título, login, senha, observação                               |
+| Cartão      | 💳    | título, número, titular, validade, CVV, bandeira, cor          |
+| Documento   | 📄    | título, tipo (RG/CPF/CNH…), número, órgão, datas               |
+| Nota segura | 📝    | título, conteúdo (texto livre)                                 |
+| Wi-Fi       | 📶    | SSID, senha, tipo de segurança                                 |
+| Licença     | 🔑    | software, chave, e-mail, data de compra, validade              |
 
 ## Funcionalidades
 
-- criação de senha mestra no primeiro uso
-- login no cofre local
+- criação de senha mestra no primeiro uso (com indicador de força em tempo real)
+- login no cofre local (tela split com painel decorativo)
 - suporte opcional a `keyfile`
-- cadastro de credenciais
-- edição de credenciais
-- exclusão de credenciais
-- listagem e busca por serviço
-- geração de senhas fortes
-- revelação de senha com reautenticação
-- cópia de senha para a área de transferência
-- exportação de credenciais em pacote criptografado
-- importação de credenciais com tratamento de duplicadas
-- atualização da segurança do cofre com nova senha mestra e/ou `keyfile`
+- cadastro, edição e exclusão de itens de qualquer tipo
+- **barra lateral (sidebar)** com filtros por categoria e contagem de itens
+- **cards coloridos** por tipo na tela principal
+- **busca global** em todos os itens
+- **favoritos** (★) com filtro dedicado
+- revelação de campos sensíveis (senha, CVV, chave) com reautenticação
+- cópia para a área de transferência com **limpeza automática em 30s**
+- **bloqueio automático** por inatividade após 5 minutos
+- gerador de senhas fortes com slider de tamanho e toggles de classes
+- alternância entre **tema escuro e claro**
+- exportação/importação de credenciais em pacote criptografado
+- atualização da segurança com nova senha mestra e/ou `keyfile`
 
 ## Segurança implementada
 
@@ -112,7 +126,8 @@ pip install -r requirements.txt
 Observação:
 
 - `Tkinter` faz parte da biblioteca padrão do Python
-- em algumas distribuições Linux, pode ser necessário instalar o pacote do sistema caso o módulo não venha disponível
+- `ttkbootstrap` é instalado automaticamente pelo `requirements.txt` (responsável pelo visual moderno)
+- em algumas distribuições Linux, pode ser necessário instalar o pacote do sistema caso o módulo `tkinter` não venha disponível
 
 ### 4. Executar a aplicação
 

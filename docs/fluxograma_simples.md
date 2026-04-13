@@ -1,40 +1,39 @@
 # Fluxograma Simples
 
-Fluxograma de visão geral do projeto **Cofre de Senhas Seguro**.
+Fluxograma de visão geral do projeto **Cofre Seguro**.
 
 ```mermaid
-
 flowchart TD
-    A[Início da aplicação] --> B[main.py inicializa armazenamento e serviço]
-    B --> C{Já existe cofre?}
+    A[Início da aplicação] --> B{Já existe cofre?}
 
-    C -- Não --> D[Tela de criação]
-    D --> E[Usuário informa senha mestra e keyfile opcional]
-    E --> F[Validar senha]
-    F --> G{Senha válida?}
-    G -- Não --> D
-    G -- Sim --> H[Criar cofre criptografado]
-    H --> I[Salvar arquivo local]
-    I --> J[Tela de login]
+    B -- Não --> C[Tela de criação]
+    C --> D[Usuário define senha mestra<br/>e keyfile opcional]
+    D --> E{Senha forte?}
+    E -- Não --> C
+    E -- Sim --> F[Cofre criado e criptografado]
+    F --> G[Tela de login]
 
-    C -- Sim --> J[Tela de login]
+    B -- Sim --> G
 
-    J --> K[Usuário informa senha mestra]
-    K --> L{Login válido?}
-    L -- Não --> M[Aplicar atraso ou bloqueio temporário]
-    M --> J
-    L -- Sim --> N[Abrir área principal]
+    G --> H[Usuário informa senha mestra]
+    H --> I{Login válido?}
+    I -- Não --> J[Atraso progressivo<br/>ou bloqueio temporário]
+    J --> G
+    I -- Sim --> K[Tela principal<br/>sidebar + dashboard + cards]
 
-    N --> O[Listar e pesquisar credenciais]
-    N --> P[Cadastrar, editar e excluir]
-    N --> Q[Revelar ou copiar senha]
-    N --> R[Exportar, importar ou fortalecer cofre]
-    N --> S[Sair]
-    O --> N
-    P --> N
-    Q --> N
-    R --> N
-    
-    S --> T[Encerrar sessão]
-    T --> U[Fim]
+    K --> L[Buscar e filtrar itens<br/>por tipo ou favoritos]
+    K --> M[Cadastrar novo item<br/>senha, cartão, documento,<br/>nota, wifi ou licença]
+    K --> N[Visualizar, editar<br/>ou excluir item]
+    K --> O[Revelar ou copiar<br/>campo sensível<br/>com reautenticação]
+    K --> P[Configurações:<br/>trocar senha, exportar,<br/>importar, alternar tema]
+    K --> Q[Sair ou inatividade<br/>5 min]
+
+    L --> K
+    M --> K
+    N --> K
+    O --> K
+    P --> K
+
+    Q --> R[Encerrar sessão<br/>limpar dados sensíveis]
+    R --> S[Fim]
 ```

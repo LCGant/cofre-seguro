@@ -38,6 +38,50 @@ from .security import (
 from .storage import GerenciadorArquivoCofre
 
 
+# Lista com todos os tipos de item que o cofre aceita guardar
+# Cada tipo tem campos diferentes, mas todos ficam criptografados igualmente
+TIPOS_SUPORTADOS = ("senha", "cartao", "documento", "nota", "wifi", "licenca")
+
+# Dicionário que diz quais campos são "sensíveis" (precisam reautenticação para exibir)
+# Por exemplo, o CVV do cartão e a chave de licença são campos que não aparecem por padrão
+CAMPOS_SENSIVEIS_POR_TIPO: dict[str, tuple[str, ...]] = {
+    "senha": ("senha",),                # Só a senha é sensível
+    "cartao": ("numero", "cvv"),        # Número do cartão e CVV são sensíveis
+    "documento": ("numero",),           # Número do documento (RG, CPF, etc) é sensível
+    "nota": ("conteudo",),              # Todo o conteúdo da nota é sensível
+    "wifi": ("senha",),                 # Só a senha do WiFi é sensível
+    "licenca": ("chave",),              # A chave da licença é sensível
+}
+
+# Dicionário que diz quais campos são obrigatórios em cada tipo de item
+# Se o usuário deixar algum desses campos vazios, o cadastro é rejeitado
+CAMPOS_OBRIGATORIOS_POR_TIPO: dict[str, tuple[str, ...]] = {
+    "senha": ("titulo", "login", "senha"),
+    "cartao": ("titulo", "numero", "validade"),
+    "documento": ("titulo", "tipo_documento", "numero"),
+    "nota": ("titulo", "conteudo"),
+    "wifi": ("titulo", "senha"),
+    "licenca": ("titulo", "chave"),
+}
+
+# Dicionário com todos os campos editáveis de cada tipo (usado para formulários e validação)
+# Inclui tanto os obrigatórios quanto os opcionais, mas NÃO os metadados (id, datas, tipo)
+CAMPOS_EDITAVEIS_POR_TIPO: dict[str, tuple[str, ...]] = {
+    "senha": ("titulo", "login", "senha", "observacao"),
+    "cartao": ("titulo", "numero", "titular", "validade", "cvv", "bandeira", "cor", "observacao"),
+    "documento": (
+        "titulo", "tipo_documento", "numero", "nome_titular",
+        "orgao_emissor", "data_emissao", "validade", "observacao",
+    ),
+    "nota": ("titulo", "conteudo", "observacao"),
+    "wifi": ("titulo", "senha", "tipo_seguranca", "observacao"),
+    "licenca": (
+        "titulo", "chave", "email_licenca", "data_compra",
+        "validade", "observacao",
+    ),
+}
+
+
 # @dataclass é um atalho do Python que cria automaticamente o __init__ e outros métodos
 # slots=True faz a classe usar menos memória
 @dataclass(slots=True)
@@ -56,7 +100,7 @@ class ResultadoLogin:
 
 # Define a classe principal que gerencia todas as operações do cofre de senhas
 class ServicoCofre:
-    """Implementa regras do cofre, autenticação e operações de credenciais."""
+    """Implementa regras do cofre, autenticação e operações de itens guardados."""
 
     # Configurações padrão de segurança contra tentativas de invasão por força bruta
     POLITICA_PADRAO = {
@@ -180,8 +224,10 @@ class ServicoCofre:
         # Pega a data e hora atuais no formato ISO (padrão internacional)
         agora = self._agora_iso()
         # Cria a estrutura inicial do cofre, vazia, com a data de criação
+        # "credenciais" é mantido como nome histórico do campo, mas agora guarda TODOS
+        # os tipos de item (senha, cartão, documento, nota, wifi, licença)
         dados_cofre = {
-            "credenciais": [],       # Lista vazia de credenciais (ainda não tem nenhuma)
+            "credenciais": [],       # Lista vazia de itens (ainda não tem nenhum)
             "metadados": {
                 "criado_em": agora,      # Quando o cofre foi criado
                 "atualizado_em": agora,  # Quando foi a última atualização
@@ -397,71 +443,248 @@ class ServicoCofre:
         # Só está autenticado se a chave da sessão e os dados do cofre existem
         return self._chave_sessao is not None and self._dados_cofre is not None
 
-    # Lista as credenciais salvas no cofre, podendo filtrar por um termo de busca
-    def listar_credenciais(self, filtro: str = "") -> list[dict[str, str]]:
-        """Lista credenciais do cofre sem expor a senha no resultado padrão."""
+    # ========================================================================
+    # API GENÉRICA DE ITENS — suporta os 6 tipos: senha, cartão, documento,
+    # nota segura, wifi e licença. Todos os itens ficam guardados na mesma
+    # lista interna, diferenciados pelo campo "tipo".
+    # ========================================================================
+
+    # Lista todos os itens do cofre (ou filtrados por tipo e termo de busca)
+    # Os campos sensíveis (senha, cvv, etc) NÃO são retornados, por segurança
+    def listar_itens(
+        self,
+        tipo: str | None = None,
+        filtro: str = "",
+        apenas_favoritos: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Lista itens do cofre sem expor campos sensíveis."""
         # Garante que o usuário está logado antes de continuar
         self._garantir_sessao()
         # Remove espaços e converte o filtro para minúsculas para busca sem distinção de maiúsculas
         termo = filtro.strip().lower()
-        # Lista que vai guardar os resultados
-        saida: list[dict[str, str]] = []
+        # Lista que vai guardar os resultados finais
+        saida: list[dict[str, Any]] = []
 
-        # Percorre cada credencial salva no cofre
-        for credencial in self._dados_cofre.get("credenciais", []):
-            # Pega os campos de cada credencial
-            servico = str(credencial.get("servico", ""))
-            login = str(credencial.get("login", ""))
-            observacao = str(credencial.get("observacao", ""))
-            # Se tem filtro e o termo não aparece nos campos, pula essa credencial
-            if termo and termo not in f"{servico} {login} {observacao}".lower():
+        # Percorre cada item guardado no cofre
+        for item in self._dados_cofre.get("credenciais", []):
+            # Normaliza o item para garantir que tem todos os campos padrão
+            item_normalizado = self._normalizar_item(item)
+            # Se foi pedido um tipo específico, e o item é de outro tipo, pula
+            if tipo and item_normalizado["tipo"] != tipo:
                 continue
-            # Adiciona a credencial na lista de saída (sem a senha, por segurança)
-            saida.append(
-                {
-                    "id": str(credencial.get("id", "")),
-                    "servico": servico,
-                    "login": login,
-                    "observacao": observacao,
-                    "atualizado_em": str(credencial.get("atualizado_em", "")),
-                }
-            )
+            # Se foi pedido só favoritos, e este não é favorito, pula
+            if apenas_favoritos and not item_normalizado.get("favorito", False):
+                continue
+            # Cria versão "pública" do item (sem campos sensíveis)
+            item_publico = self._item_sem_sensiveis(item_normalizado)
+            # Se tem termo de busca, verifica se aparece em algum campo visível
+            if termo:
+                # Monta um texto com todos os valores do item para buscar
+                texto_busca = " ".join(str(valor) for valor in item_publico.values()).lower()
+                # Se o termo não aparece, pula esse item
+                if termo not in texto_busca:
+                    continue
+            # Adiciona o item sanitizado na lista de saída
+            saida.append(item_publico)
 
-        # Ordena a lista pelo nome do serviço em ordem alfabética
-        saida.sort(key=lambda item: item["servico"].lower())
-        # Retorna a lista de credenciais encontradas
+        # Ordena: favoritos primeiro, depois por título alfabético
+        saida.sort(key=lambda i: (not i.get("favorito", False), str(i.get("titulo", "")).lower()))
+        # Retorna a lista final
         return saida
 
-    # Busca e retorna uma credencial específica pelo seu identificador (ID)
+    # Obtém um item específico pelo ID, com opção de revelar campos sensíveis
+    def obter_item(
+        self,
+        item_id: str,
+        incluir_sensiveis: bool = False,
+    ) -> dict[str, Any] | None:
+        """Obtém um item específico pelo identificador interno."""
+        # Garante que o usuário está logado
+        self._garantir_sessao()
+        # Procura o item bruto pelo ID
+        item_bruto = self._buscar_item_por_id(item_id)
+        # Se não encontrou, retorna None (nada)
+        if item_bruto is None:
+            return None
+        # Normaliza o item (garante campos padrão)
+        item_normalizado = self._normalizar_item(item_bruto)
+        # Se foi pedido para incluir campos sensíveis, retorna tudo
+        if incluir_sensiveis:
+            return dict(item_normalizado)
+        # Caso contrário, retorna sem os campos sensíveis
+        return self._item_sem_sensiveis(item_normalizado)
+
+    # Conta quantos itens existem em cada tipo (usado para mostrar na sidebar)
+    def contar_por_tipo(self) -> dict[str, int]:
+        """Conta quantos itens existem em cada tipo para exibir na interface."""
+        # Garante que o usuário está logado
+        self._garantir_sessao()
+        # Cria um dicionário começando com zero para cada tipo suportado
+        contagem = {tipo: 0 for tipo in TIPOS_SUPORTADOS}
+        # Percorre cada item e conta pelo seu tipo
+        for item in self._dados_cofre.get("credenciais", []):
+            tipo_item = self._resolver_tipo(item)
+            if tipo_item in contagem:
+                contagem[tipo_item] += 1
+        # Retorna o dicionário com a contagem de cada tipo
+        return contagem
+
+    # Adiciona um novo item de qualquer tipo suportado ao cofre
+    def adicionar_item(self, tipo: str, dados: dict[str, Any]) -> str:
+        """Adiciona um novo item de qualquer tipo suportado ao cofre."""
+        # Garante que o usuário está logado
+        self._garantir_sessao()
+        # Valida e normaliza os dados recebidos conforme o tipo informado
+        dados_validos = self._validar_dados_item(tipo, dados)
+        # Verifica se já existe item igual (mesmo tipo e mesmo título) para evitar duplicatas
+        if self._item_duplicado(tipo, dados_validos["titulo"]):
+            raise ValueError("Já existe um item desse tipo com o mesmo título.")
+
+        # Pega a data e hora atuais
+        agora = self._agora_iso()
+        # Cria o novo item com ID único, tipo, favorito inicial False e datas
+        novo_item: dict[str, Any] = {
+            "id": secrets.token_hex(16),     # Identificador único aleatório (32 caracteres hex)
+            "tipo": tipo,                     # Tipo do item (senha, cartao, etc)
+            "favorito": False,                # Começa não favorito
+            "criado_em": agora,               # Data de criação
+            "atualizado_em": agora,           # Data da última atualização
+        }
+        # Copia todos os campos validados para o novo item
+        novo_item.update(dados_validos)
+        # Adiciona o item na lista interna do cofre
+        self._dados_cofre["credenciais"].append(novo_item)
+        # Criptografa e salva no disco
+        self._persistir_cofre()
+        # Retorna o ID gerado para quem chamou poder usar (abrir detalhes, etc)
+        return novo_item["id"]
+
+    # Edita um item existente, atualizando seus campos
+    def editar_item(self, item_id: str, dados: dict[str, Any]) -> None:
+        """Atualiza os dados de um item existente."""
+        # Garante que o usuário está logado
+        self._garantir_sessao()
+        # Procura o item pelo ID
+        item = self._buscar_item_por_id(item_id)
+        # Se não encontrou, lança erro
+        if item is None:
+            raise ValueError("Item não encontrado.")
+
+        # Pega o tipo do item (normalizando, caso seja legado sem campo "tipo")
+        tipo_item = self._resolver_tipo(item)
+        # Valida os dados para o tipo deste item
+        dados_validos = self._validar_dados_item(tipo_item, dados)
+        # Verifica duplicata (ignora o próprio item sendo editado)
+        if self._item_duplicado(tipo_item, dados_validos["titulo"], ignorar_id=item_id):
+            raise ValueError("Já existe outro item desse tipo com o mesmo título.")
+
+        # Garante que o campo "tipo" está presente no item (cofres legados podem não ter)
+        item["tipo"] = tipo_item
+        # Atualiza todos os campos editáveis
+        for campo in CAMPOS_EDITAVEIS_POR_TIPO[tipo_item]:
+            item[campo] = dados_validos.get(campo, item.get(campo, ""))
+        # Atualiza a data de modificação
+        item["atualizado_em"] = self._agora_iso()
+        # Criptografa e salva no disco
+        self._persistir_cofre()
+
+    # Alterna (liga/desliga) o status de favorito de um item
+    def alternar_favorito(self, item_id: str) -> bool:
+        """Alterna o estado de favorito de um item e salva."""
+        # Garante que o usuário está logado
+        self._garantir_sessao()
+        # Procura o item pelo ID
+        item = self._buscar_item_por_id(item_id)
+        # Se não encontrou, lança erro
+        if item is None:
+            raise ValueError("Item não encontrado.")
+        # Inverte o estado de favorito (True ↔ False)
+        novo_estado = not bool(item.get("favorito", False))
+        item["favorito"] = novo_estado
+        # Atualiza a data de modificação
+        item["atualizado_em"] = self._agora_iso()
+        # Criptografa e salva no disco
+        self._persistir_cofre()
+        # Retorna o novo estado para a interface atualizar
+        return novo_estado
+
+    # Revela um campo sensível específico após reautenticação da senha mestra
+    def revelar_campo(self, item_id: str, campo: str, senha_mestra: str) -> str:
+        """Revela um campo sensível de um item após reautenticação."""
+        # Garante que o usuário está logado
+        self._garantir_sessao()
+        # Verifica a senha mestra antes de revelar qualquer coisa
+        if not self.autenticar_acao_sensivel(senha_mestra):
+            raise PermissionError("Falha de autenticação para revelar o campo solicitado.")
+        # Procura o item pelo ID
+        item = self._buscar_item_por_id(item_id)
+        # Se não encontrou, lança erro
+        if item is None:
+            raise ValueError("Item não encontrado.")
+
+        # Determina o tipo do item para descobrir quais campos são sensíveis
+        tipo_item = self._resolver_tipo(item)
+        # Lista de campos considerados sensíveis para este tipo
+        campos_permitidos = CAMPOS_SENSIVEIS_POR_TIPO.get(tipo_item, ())
+        # Só permite revelar campos que estão na lista de sensíveis (segurança extra)
+        if campo not in campos_permitidos:
+            raise ValueError("Campo solicitado não pode ser revelado desta forma.")
+        # Retorna o valor do campo sensível como texto
+        return str(item.get(campo, ""))
+
+    # ========================================================================
+    # API LEGADA (compatibilidade) — só para o tipo "senha". Mantida para não
+    # quebrar código/chamadores antigos. Internamente usa a API genérica.
+    # ========================================================================
+
+    # Lista as credenciais (itens do tipo "senha") no formato antigo
+    def listar_credenciais(self, filtro: str = "") -> list[dict[str, str]]:
+        """Lista credenciais (apenas senhas) no formato legado."""
+        # Busca apenas itens do tipo "senha"
+        itens = self.listar_itens(tipo="senha", filtro=filtro)
+        # Converte para o formato antigo que usa "servico" em vez de "titulo"
+        saida: list[dict[str, str]] = []
+        for item in itens:
+            saida.append({
+                "id": str(item.get("id", "")),
+                "servico": str(item.get("titulo", "")),
+                "login": str(item.get("login", "")),
+                "observacao": str(item.get("observacao", "")),
+                "atualizado_em": str(item.get("atualizado_em", "")),
+            })
+        # Retorna a lista no formato antigo
+        return saida
+
+    # Obtém uma credencial no formato antigo (compatibilidade)
     def obter_credencial(
         self,
         credencial_id: str,
         incluir_senha: bool = False,
     ) -> dict[str, str] | None:
-        """Obtém uma credencial específica pelo identificador interno."""
-        # Garante que o usuário está logado
-        self._garantir_sessao()
-        # Procura a credencial pelo ID
-        credencial = self._buscar_credencial_por_id(credencial_id)
-        # Se não encontrou, retorna None (nada)
-        if credencial is None:
+        """Obtém credencial específica no formato legado."""
+        # Busca o item completo
+        item = self.obter_item(credencial_id, incluir_sensiveis=incluir_senha)
+        # Se não encontrou, retorna None
+        if item is None:
             return None
-
-        # Monta o dicionário com os dados da credencial (sem a senha por padrão)
+        # Se o tipo não é "senha", devolve None (compatibilidade: API legada só vê senhas)
+        if item.get("tipo") != "senha":
+            return None
+        # Monta o dicionário no formato antigo
         resultado = {
-            "id": str(credencial.get("id", "")),
-            "servico": str(credencial.get("servico", "")),
-            "login": str(credencial.get("login", "")),
-            "observacao": str(credencial.get("observacao", "")),
-            "atualizado_em": str(credencial.get("atualizado_em", "")),
+            "id": str(item.get("id", "")),
+            "servico": str(item.get("titulo", "")),
+            "login": str(item.get("login", "")),
+            "observacao": str(item.get("observacao", "")),
+            "atualizado_em": str(item.get("atualizado_em", "")),
         }
-        # Se foi pedido para incluir a senha, adiciona ela no resultado
+        # Se foi pedida a senha, adiciona ao resultado
         if incluir_senha:
-            resultado["senha"] = str(credencial.get("senha", ""))
-        # Retorna os dados da credencial
+            resultado["senha"] = str(item.get("senha", ""))
+        # Retorna no formato legado
         return resultado
 
-    # Adiciona uma nova credencial (serviço, login, senha) ao cofre
+    # Adiciona uma credencial (senha) pelo formato legado (servico/login/senha)
     def adicionar_credencial(
         self,
         servico: str,
@@ -469,49 +692,16 @@ class ServicoCofre:
         senha: str,
         observacao: str = "",
     ) -> str:
-        """Adiciona nova credencial validada e persiste o cofre criptografado."""
-        # Garante que o usuário está logado
-        self._garantir_sessao()
-        # Remove espaços extras do início e fim dos campos
-        servico_limpo = servico.strip()
-        login_limpo = login.strip()
-        observacao_limpa = observacao.strip()
-
-        # Verifica se o campo serviço foi preenchido
-        if not servico_limpo:
-            raise ValueError("O campo Serviço é obrigatório.")
-        # Verifica se o campo login foi preenchido
-        if not login_limpo:
-            raise ValueError("O campo Usuário/E-mail é obrigatório.")
-        # Verifica se o campo senha foi preenchido
-        if not senha:
-            raise ValueError("O campo Senha é obrigatório.")
-
-        # Verifica se já existe uma credencial com o mesmo serviço e login
-        if self._credencial_duplicada(servico_limpo, login_limpo):
-            raise ValueError("Já existe uma credencial para este serviço e usuário.")
-
-        # Pega a data e hora atuais
-        agora = self._agora_iso()
-        # Monta o dicionário da nova credencial com todos os dados
-        credencial = {
-            "id": secrets.token_hex(16),    # Gera um identificador único aleatório
-            "servico": servico_limpo,
-            "login": login_limpo,
+        """Adiciona nova credencial (formato legado)."""
+        # Usa a API genérica adaptando "servico" para "titulo"
+        return self.adicionar_item("senha", {
+            "titulo": servico,
+            "login": login,
             "senha": senha,
-            "observacao": observacao_limpa,
-            "criado_em": agora,             # Data de criação
-            "atualizado_em": agora,         # Data da última atualização
-        }
+            "observacao": observacao,
+        })
 
-        # Adiciona a nova credencial na lista de credenciais do cofre
-        self._dados_cofre["credenciais"].append(credencial)
-        # Criptografa e salva o cofre atualizado no disco
-        self._persistir_cofre()
-        # Retorna o ID da credencial criada
-        return credencial["id"]
-
-    # Edita (atualiza) uma credencial que já existe no cofre
+    # Edita uma credencial (senha) pelo formato legado
     def editar_credencial(
         self,
         credencial_id: str,
@@ -520,67 +710,42 @@ class ServicoCofre:
         senha: str,
         observacao: str = "",
     ) -> None:
-        """Atualiza uma credencial existente com validação de duplicidade."""
-        # Garante que o usuário está logado
-        self._garantir_sessao()
-        # Remove espaços extras dos campos
-        servico_limpo = servico.strip()
-        login_limpo = login.strip()
-        observacao_limpa = observacao.strip()
+        """Atualiza credencial existente (formato legado)."""
+        # Usa a API genérica adaptando campos
+        self.editar_item(credencial_id, {
+            "titulo": servico,
+            "login": login,
+            "senha": senha,
+            "observacao": observacao,
+        })
 
-        # Verifica se o campo serviço foi preenchido
-        if not servico_limpo:
-            raise ValueError("O campo Serviço é obrigatório.")
-        # Verifica se o campo login foi preenchido
-        if not login_limpo:
-            raise ValueError("O campo Usuário/E-mail é obrigatório.")
-        # Verifica se o campo senha foi preenchido
-        if not senha:
-            raise ValueError("O campo Senha é obrigatório.")
-
-        # Busca a credencial pelo ID
-        credencial = self._buscar_credencial_por_id(credencial_id)
-        # Se não encontrou, mostra erro
-        if credencial is None:
-            raise ValueError("Credencial não encontrada.")
-
-        # Verifica se já existe OUTRA credencial com o mesmo serviço e login
-        # (ignora a própria credencial que está sendo editada)
-        if self._credencial_duplicada(servico_limpo, login_limpo, ignorar_id=credencial_id):
-            raise ValueError("Já existe outra credencial para este serviço e usuário.")
-
-        # Atualiza os campos da credencial com os novos valores
-        credencial["servico"] = servico_limpo
-        credencial["login"] = login_limpo
-        credencial["senha"] = senha
-        credencial["observacao"] = observacao_limpa
-        # Atualiza a data de modificação
-        credencial["atualizado_em"] = self._agora_iso()
-        # Criptografa e salva o cofre atualizado no disco
-        self._persistir_cofre()
-
-    # Remove (exclui) uma credencial do cofre
+    # Remove um item do cofre (alias histórico: "excluir_credencial")
     def excluir_credencial(self, credencial_id: str) -> None:
-        """Remove uma credencial do cofre e grava as alterações."""
+        """Remove um item do cofre (alias mantido por compatibilidade)."""
+        self.excluir_item(credencial_id)
+
+    # Remove um item do cofre pelo ID (API nova)
+    def excluir_item(self, item_id: str) -> None:
+        """Remove um item do cofre e grava as alterações."""
         # Garante que o usuário está logado
         self._garantir_sessao()
-        # Pega a lista de credenciais atual
-        credenciais = self._dados_cofre.get("credenciais", [])
+        # Pega a lista de itens atual
+        itens = self._dados_cofre.get("credenciais", [])
         # Guarda o tamanho da lista antes de filtrar
-        tamanho_antes = len(credenciais)
-        # Cria uma nova lista SEM a credencial que queremos excluir
-        credenciais_filtradas = [item for item in credenciais if item.get("id") != credencial_id]
+        tamanho_antes = len(itens)
+        # Cria uma nova lista SEM o item que queremos excluir
+        itens_filtrados = [atual for atual in itens if atual.get("id") != item_id]
 
-        # Se o tamanho não mudou, significa que não encontrou a credencial para excluir
-        if len(credenciais_filtradas) == tamanho_antes:
-            raise ValueError("Credencial não encontrada.")
+        # Se o tamanho não mudou, não encontrou o item para excluir
+        if len(itens_filtrados) == tamanho_antes:
+            raise ValueError("Item não encontrado.")
 
-        # Substitui a lista de credenciais pela lista filtrada (sem a excluída)
-        self._dados_cofre["credenciais"] = credenciais_filtradas
-        # Criptografa e salva o cofre atualizado no disco
+        # Substitui a lista pelo resultado filtrado
+        self._dados_cofre["credenciais"] = itens_filtrados
+        # Criptografa e salva no disco
         self._persistir_cofre()
 
-    # Verifica a senha mestra novamente para confirmar ações importantes (como revelar senha)
+    # Verifica a senha mestra para ações sensíveis (usado internamente e pela API)
     def autenticar_acao_sensivel(self, senha_mestra: str) -> bool:
         """Revalida a senha mestra para ações sensíveis usando a sessão atual."""
         # Carrega o arquivo do cofre
@@ -593,25 +758,13 @@ class ServicoCofre:
             segredo_keyfile=self._segredo_keyfile_sessao,
         )
 
-    # Mostra a senha de uma credencial, mas só se o usuário confirmar a senha mestra
+    # Revela a senha de uma credencial (método legado; usa revelar_campo internamente)
     def revelar_senha(self, credencial_id: str, senha_mestra: str) -> str:
-        """Revela a senha de uma credencial após autenticação correta."""
-        # Garante que o usuário está logado
-        self._garantir_sessao()
-        # Verifica a senha mestra para garantir que é realmente o dono do cofre
-        if not self.autenticar_acao_sensivel(senha_mestra):
-            raise PermissionError("Falha de autenticação para revelar a senha.")
-
-        # Busca a credencial pelo ID
-        credencial = self._buscar_credencial_por_id(credencial_id)
-        # Se não encontrou, mostra erro
-        if credencial is None:
-            raise ValueError("Credencial não encontrada.")
-
-        # Retorna a senha da credencial
-        return str(credencial.get("senha", ""))
+        """Revela a senha de uma credencial após autenticação (formato legado)."""
+        return self.revelar_campo(credencial_id, "senha", senha_mestra)
 
     # Exporta (copia) credenciais para um arquivo separado, protegido por outra senha
+    # Mantém compatibilidade: exporta APENAS itens do tipo "senha"
     def exportar_credenciais(
         self,
         caminho_destino: str | Path,
@@ -635,20 +788,32 @@ class ServicoCofre:
         if caminho_resolvido == self._armazenamento.caminho:
             raise ValueError("Escolha outro arquivo; a exportação não pode sobrescrever o cofre atual.")
 
-        # Pega todas as credenciais do cofre
-        credenciais_fonte = self._dados_cofre.get("credenciais", [])
+        # Pega todos os itens do cofre e filtra só os do tipo senha
+        itens_fonte = [
+            item for item in self._dados_cofre.get("credenciais", [])
+            if self._resolver_tipo(item) == "senha"
+        ]
         # Se foram informados IDs específicos, cria um conjunto para filtrar
         ids_filtrados = set(credencial_ids or [])
-        # Lista que vai guardar as credenciais selecionadas para exportação
+        # Lista que vai guardar os itens selecionados para exportação
         credenciais_exportadas: list[dict[str, Any]] = []
 
         # Percorre cada credencial do cofre
-        for credencial in credenciais_fonte:
+        for credencial in itens_fonte:
             # Se há filtro de IDs e esta credencial não está na lista, pula
             if ids_filtrados and str(credencial.get("id")) not in ids_filtrados:
                 continue
-            # Adiciona uma cópia da credencial na lista de exportação
-            credenciais_exportadas.append(dict(credencial))
+            # Converte para formato legado (servico em vez de titulo) para compatibilidade
+            credencial_legada = {
+                "id": credencial.get("id"),
+                "servico": credencial.get("titulo", credencial.get("servico", "")),
+                "login": credencial.get("login", ""),
+                "senha": credencial.get("senha", ""),
+                "observacao": credencial.get("observacao", ""),
+                "criado_em": credencial.get("criado_em", ""),
+                "atualizado_em": credencial.get("atualizado_em", ""),
+            }
+            credenciais_exportadas.append(credencial_legada)
 
         # Se nenhuma credencial foi selecionada, mostra erro
         if not credenciais_exportadas:
@@ -662,11 +827,11 @@ class ServicoCofre:
         agora = self._agora_iso()
         # Monta o pacote de exportação com tudo criptografado
         pacote = {
-            "tipo": "exportacao_credenciais_cofre_seguro",  # Identificador do tipo de arquivo
-            "versao_exportacao": 1,                          # Versão do formato de exportação
-            "kdf": registro["kdf"],                          # Configurações de derivação de chave
-            "verificador_senha": registro["verificador_senha"],  # Verificador da senha
-            "dados_exportados_criptografados": criptografar_objeto(  # Dados criptografados
+            "tipo": "exportacao_credenciais_cofre_seguro",
+            "versao_exportacao": 1,
+            "kdf": registro["kdf"],
+            "verificador_senha": registro["verificador_senha"],
+            "dados_exportados_criptografados": criptografar_objeto(
                 {
                     "credenciais": credenciais_exportadas,
                     "metadados": {
@@ -743,19 +908,19 @@ class ServicoCofre:
                 ignoradas += 1
                 continue
 
-            # Pega os campos do item, removendo espaços extras
-            servico = str(item.get("servico", "")).strip()
+            # Pega os campos (aceita tanto "servico" antigo quanto "titulo" novo)
+            titulo = str(item.get("titulo", item.get("servico", ""))).strip()
             login = str(item.get("login", "")).strip()
             senha = str(item.get("senha", ""))
             observacao = str(item.get("observacao", "")).strip()
 
             # Se falta algum campo obrigatório, ignora esse item
-            if not servico or not login or not senha:
+            if not titulo or not login or not senha:
                 ignoradas += 1
                 continue
 
-            # Procura se já existe uma credencial com o mesmo serviço e login
-            existente = self._buscar_credencial_por_servico_login(servico, login)
+            # Procura item duplicado (mesmo título e mesmo login no tipo "senha")
+            existente = self._buscar_item_senha_por_titulo_login(titulo, login)
             # Se já existe uma igual no cofre
             if existente is not None:
                 # Se não foi pedido para sobrescrever duplicadas, ignora
@@ -769,25 +934,27 @@ class ServicoCofre:
                 atualizadas += 1
                 continue
 
-            # Se não existe, cria uma nova credencial
-            nova_credencial = {
-                "id": secrets.token_hex(16),  # Gera um novo ID aleatório
-                "servico": servico,
+            # Se não existe, cria uma nova credencial do tipo "senha"
+            novo_item = {
+                "id": secrets.token_hex(16),
+                "tipo": "senha",
+                "favorito": False,
+                "titulo": titulo,
                 "login": login,
                 "senha": senha,
                 "observacao": observacao,
-                "criado_em": str(item.get("criado_em", agora)),         # Mantém a data original se tiver
-                "atualizado_em": str(item.get("atualizado_em", agora)), # Mantém a data original se tiver
+                "criado_em": str(item.get("criado_em", agora)),
+                "atualizado_em": str(item.get("atualizado_em", agora)),
             }
             # Adiciona a nova credencial no cofre
-            self._dados_cofre["credenciais"].append(nova_credencial)
+            self._dados_cofre["credenciais"].append(novo_item)
             inseridas += 1
 
         # Se houve alguma inserção ou atualização, salva o cofre
         if inseridas or atualizadas:
             self._persistir_cofre()
 
-        # Retorna o resumo da importação (quantas foram inseridas, atualizadas e ignoradas)
+        # Retorna o resumo da importação
         return {
             "inseridas": inseridas,
             "atualizadas": atualizadas,
@@ -877,26 +1044,45 @@ class ServicoCofre:
         return "Proteção com keyfile removida; o cofre segue protegido pela senha mestra."
 
     # Gera uma senha forte aleatória para o usuário usar em algum serviço
-    def gerar_senha(self, comprimento: int = 16) -> str:
+    def gerar_senha(
+        self,
+        comprimento: int = 16,
+        incluir_maiusculas: bool = True,
+        incluir_minusculas: bool = True,
+        incluir_numeros: bool = True,
+        incluir_especiais: bool = True,
+    ) -> str:
         """Gera senha forte para preenchimento rápido no formulário."""
-        return gerar_senha_forte(comprimento=comprimento)
+        # Encaminha todos os parâmetros para a função do módulo de segurança
+        return gerar_senha_forte(
+            comprimento=comprimento,
+            incluir_maiusculas=incluir_maiusculas,
+            incluir_minusculas=incluir_minusculas,
+            incluir_numeros=incluir_numeros,
+            incluir_especiais=incluir_especiais,
+        )
 
     # Encerra a sessão atual, limpando todos os dados sensíveis da memória
     def encerrar_sessao(self) -> None:
         """Limpa referências de sessão para reduzir exposição em memória."""
-        # Se existem dados do cofre na memória, apaga as senhas armazenadas
+        # Se existem dados do cofre na memória, apaga os campos sensíveis
         if isinstance(self._dados_cofre, dict):
-            # Percorre cada credencial e apaga a senha da memória
-            for credencial in self._dados_cofre.get("credenciais", []):
-                if "senha" in credencial:
-                    credencial["senha"] = ""
+            # Percorre cada item e zera seus campos sensíveis
+            for item in self._dados_cofre.get("credenciais", []):
+                tipo_item = self._resolver_tipo(item)
+                # Limpa todos os campos sensíveis daquele tipo
+                for campo_sensivel in CAMPOS_SENSIVEIS_POR_TIPO.get(tipo_item, ()):
+                    if campo_sensivel in item:
+                        item[campo_sensivel] = ""
 
         # Limpa todas as referências de sessão (dados, chave e keyfile)
         self._dados_cofre = None
         self._chave_sessao = None
         self._segredo_keyfile_sessao = None
 
-    # --- Métodos internos (privados) - usados apenas dentro desta classe ---
+    # ========================================================================
+    # Métodos internos (privados) — usados apenas dentro desta classe
+    # ========================================================================
 
     # Criptografa e salva os dados do cofre no arquivo
     def _persistir_cofre(self) -> None:
@@ -921,7 +1107,7 @@ class ServicoCofre:
         # Salva o arquivo atualizado no disco
         self._armazenamento.salvar(dados_arquivo)
 
-    # Descriptografa os dados do cofre, tratando formato atual e legado (antigo)
+    # Descriptografa os dados do cofre, tratando formato atual e legado
     def _abrir_carga_criptografada(
         self,
         dados_arquivo: dict[str, Any],
@@ -929,7 +1115,7 @@ class ServicoCofre:
         segredo_keyfile: bytes | None,
     ) -> tuple[dict[str, Any], bytes | None]:
         """Abre os dados do cofre conforme o formato atual ou legado."""
-        # Se o arquivo usa o formato antigo (legado), usa o método antigo de descriptografia
+        # Se o arquivo usa o formato antigo (legado), usa o método antigo
         if self._arquivo_usa_formato_legado(dados_arquivo):
             # Gera a chave no formato antigo (Fernet)
             chave_fernet = gerar_chave_fernet_legado(senha_mestra, dados_arquivo["kdf"])
@@ -955,7 +1141,7 @@ class ServicoCofre:
         # Retorna os dados e a chave AES para uso na sessão
         return dados_cofre, chave_aes
 
-    # Migra (atualiza) cofres no formato antigo para o formato moderno mais seguro
+    # Migra (atualiza) cofres no formato antigo para o formato moderno
     def _migrar_arquivo_se_necessario(
         self,
         dados_arquivo: dict[str, Any],
@@ -1025,91 +1211,204 @@ class ServicoCofre:
         return {
             "versao": VERSAO_COFRE_ATUAL,  # Versão do formato do cofre
             "kdf": registro["kdf"],        # Configurações de derivação de chave
-            "verificador_senha": registro["verificador_senha"],  # Hash da senha para verificação
-            "dados_cofre_criptografados": criptografar_objeto(dados_cofre, chave_criptografia),  # Dados embaralhados
+            "verificador_senha": registro["verificador_senha"],
+            "dados_cofre_criptografados": criptografar_objeto(dados_cofre, chave_criptografia),
             "controle_acesso": {
-                # Número de tentativas de login erradas seguidas
                 "falhas_consecutivas": int((controle_acesso or {}).get("falhas_consecutivas", 0)),
-                # Momento até quando o cofre está bloqueado
                 "bloqueado_ate": float((controle_acesso or {}).get("bloqueado_ate", 0.0)),
-                # Quantas vezes o cofre já foi bloqueado
                 "bloqueios_aplicados": int((controle_acesso or {}).get("bloqueios_aplicados", 0)),
             },
-            # Regras de política de acesso (ou usa as padrão se não tiver)
             "politica_acesso": dict(politica_acesso or self.POLITICA_PADRAO),
-            "metadados": metadados,  # Informações sobre datas de criação e atualização
+            "metadados": metadados,
         }
 
-    # Procura uma credencial na lista pelo seu identificador único (ID)
-    def _buscar_credencial_por_id(self, credencial_id: str) -> dict[str, Any] | None:
-        """Procura uma credencial pelo identificador único."""
-        # Percorre cada credencial do cofre
-        for credencial in self._dados_cofre.get("credenciais", []):
-            # Se o ID bate, retorna a credencial encontrada
-            if credencial.get("id") == credencial_id:
-                return credencial
-        # Se não encontrou nenhuma, retorna None (nada)
-        return None
-
-    # Procura uma credencial pelo par serviço + login (ex: "Gmail" + "joao@gmail.com")
-    def _buscar_credencial_por_servico_login(
-        self,
-        servico: str,
-        login: str,
-    ) -> dict[str, Any] | None:
-        """Procura uma credencial pelo par serviço e usuário."""
-        # Converte para minúsculas para comparar sem diferenciar maiúsculas
-        alvo_servico = servico.lower()
-        alvo_login = login.lower()
-        # Percorre cada credencial do cofre
-        for credencial in self._dados_cofre.get("credenciais", []):
-            # Pega o serviço e login da credencial atual em minúsculas
-            servico_atual = str(credencial.get("servico", "")).lower()
-            login_atual = str(credencial.get("login", "")).lower()
-            # Se ambos batem, retorna a credencial encontrada
-            if servico_atual == alvo_servico and login_atual == alvo_login:
-                return credencial
+    # Procura um item (qualquer tipo) pelo identificador único
+    def _buscar_item_por_id(self, item_id: str) -> dict[str, Any] | None:
+        """Procura um item no cofre pelo identificador único."""
+        # Percorre cada item do cofre
+        for item in self._dados_cofre.get("credenciais", []):
+            # Se o ID bate, retorna o item
+            if item.get("id") == item_id:
+                return item
         # Se não encontrou, retorna None
         return None
 
-    # Verifica se já existe outra credencial com o mesmo serviço e login
-    def _credencial_duplicada(
+    # Procura item do tipo "senha" pelo par título + login (usado na importação)
+    def _buscar_item_senha_por_titulo_login(
         self,
-        servico: str,
+        titulo: str,
         login: str,
+    ) -> dict[str, Any] | None:
+        """Busca item tipo 'senha' pelo título e login (case-insensitive)."""
+        # Normaliza busca para caixa baixa
+        alvo_titulo = titulo.lower()
+        alvo_login = login.lower()
+        # Percorre todos os itens do cofre
+        for item in self._dados_cofre.get("credenciais", []):
+            # Só interessa itens de senha (ignora cartões, notas, etc)
+            if self._resolver_tipo(item) != "senha":
+                continue
+            # Pega título (aceita campo legado "servico" se "titulo" não existir)
+            titulo_atual = str(item.get("titulo", item.get("servico", ""))).lower()
+            login_atual = str(item.get("login", "")).lower()
+            # Se ambos batem, retorna o item encontrado
+            if titulo_atual == alvo_titulo and login_atual == alvo_login:
+                return item
+        # Não encontrou
+        return None
+
+    # Verifica se já existe item duplicado (mesmo tipo + mesmo título)
+    def _item_duplicado(
+        self,
+        tipo: str,
+        titulo: str,
         ignorar_id: str | None = None,
     ) -> bool:
-        """Valida duplicidade por serviço e usuário de forma case-insensitive."""
-        # Converte para minúsculas para comparação sem diferenciar maiúsculas
-        alvo_servico = servico.lower()
-        alvo_login = login.lower()
-
-        # Percorre cada credencial do cofre
-        for credencial in self._dados_cofre.get("credenciais", []):
-            # Se há um ID para ignorar (ex: ao editar), pula essa credencial
-            if ignorar_id and credencial.get("id") == ignorar_id:
+        """Valida duplicidade por tipo e título de forma case-insensitive."""
+        # Normaliza para caixa baixa
+        alvo = titulo.strip().lower()
+        # Percorre todos os itens do cofre
+        for item in self._dados_cofre.get("credenciais", []):
+            # Se tem ID para ignorar (caso de edição), pula esse item
+            if ignorar_id and item.get("id") == ignorar_id:
                 continue
-            # Pega serviço e login em minúsculas
-            servico_atual = str(credencial.get("servico", "")).lower()
-            login_atual = str(credencial.get("login", "")).lower()
-            # Se encontrou uma duplicata, retorna True (sim, é duplicada)
-            if servico_atual == alvo_servico and login_atual == alvo_login:
+            # Só considera itens do mesmo tipo
+            if self._resolver_tipo(item) != tipo:
+                continue
+            # Pega o título (aceita campo legado "servico")
+            titulo_atual = str(item.get("titulo", item.get("servico", ""))).strip().lower()
+            # Se bate, é duplicata
+            if titulo_atual == alvo:
                 return True
-
-        # Se não encontrou duplicata, retorna False
+        # Não encontrou duplicata
         return False
+
+    # Descobre o tipo de um item, cuidando de itens legados que não têm campo "tipo"
+    def _resolver_tipo(self, item: dict[str, Any]) -> str:
+        """Descobre o tipo do item; itens antigos sem campo 'tipo' viram 'senha'."""
+        # Pega o tipo explícito, se existir
+        tipo_bruto = str(item.get("tipo", "")).strip().lower()
+        # Se não for um tipo válido, assume "senha" (compatibilidade com cofres antigos)
+        if tipo_bruto in TIPOS_SUPORTADOS:
+            return tipo_bruto
+        return "senha"
+
+    # Normaliza um item bruto para o formato padrão moderno
+    # Garante que tem campo "tipo", "favorito", "titulo" (no caso de campo legado "servico")
+    def _normalizar_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Garante que o item tem os campos padronizados (tipo, titulo, favorito)."""
+        # Cria uma cópia para não mexer no original
+        normalizado = dict(item)
+        # Resolve o tipo (aceita item legado sem campo "tipo")
+        normalizado["tipo"] = self._resolver_tipo(item)
+        # Se não tem "titulo" mas tem campo legado "servico", migra
+        if "titulo" not in normalizado and "servico" in normalizado:
+            normalizado["titulo"] = normalizado["servico"]
+        # Garante que tem o campo favorito (padrão: False)
+        normalizado.setdefault("favorito", False)
+        # Garante que tem os campos editáveis daquele tipo (ainda que vazios)
+        for campo in CAMPOS_EDITAVEIS_POR_TIPO[normalizado["tipo"]]:
+            normalizado.setdefault(campo, "")
+        # Retorna a versão normalizada
+        return normalizado
+
+    # Remove os campos sensíveis de um item para exibição na lista
+    def _item_sem_sensiveis(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Cria cópia do item sem os campos marcados como sensíveis."""
+        # Copia o item
+        copia = dict(item)
+        # Pega o tipo para saber quais campos remover
+        tipo_item = self._resolver_tipo(item)
+        # Remove cada campo sensível da cópia
+        for campo_sensivel in CAMPOS_SENSIVEIS_POR_TIPO.get(tipo_item, ()):
+            copia.pop(campo_sensivel, None)
+        # Retorna a versão "pública" do item
+        return copia
+
+    # Valida e normaliza os dados enviados para criar ou editar um item
+    def _validar_dados_item(self, tipo: str, dados: dict[str, Any]) -> dict[str, Any]:
+        """Valida campos obrigatórios conforme o tipo do item."""
+        # Rejeita se o tipo não é um dos suportados
+        if tipo not in TIPOS_SUPORTADOS:
+            raise ValueError(f"Tipo de item '{tipo}' não é suportado.")
+
+        # Cria um dicionário limpo só com os campos permitidos para o tipo
+        limpos: dict[str, Any] = {}
+        for campo in CAMPOS_EDITAVEIS_POR_TIPO[tipo]:
+            valor = dados.get(campo, "")
+            # Converte None para string vazia
+            if valor is None:
+                valor = ""
+            # Strings ficam com strip para tirar espaços extras nas bordas
+            # Conteúdo de notas é exceção: preserva espaços e quebras de linha
+            if isinstance(valor, str) and campo != "conteudo":
+                valor = valor.strip()
+            limpos[campo] = valor
+
+        # Confere se todos os campos obrigatórios estão preenchidos
+        for campo_obrigatorio in CAMPOS_OBRIGATORIOS_POR_TIPO[tipo]:
+            if not limpos.get(campo_obrigatorio):
+                # Gera mensagem amigável usando o rótulo do campo
+                raise ValueError(
+                    f"O campo '{self._rotulo_amigavel_campo(campo_obrigatorio)}' é obrigatório."
+                )
+
+        # Validações específicas por tipo
+        if tipo == "cartao":
+            # Remove espaços e traços do número do cartão
+            limpos["numero"] = limpos["numero"].replace(" ", "").replace("-", "")
+            # Verifica se o número do cartão tem só dígitos e tamanho plausível
+            if not limpos["numero"].isdigit():
+                raise ValueError("O número do cartão deve conter apenas dígitos.")
+            if not (12 <= len(limpos["numero"]) <= 19):
+                raise ValueError("O número do cartão deve ter entre 12 e 19 dígitos.")
+            # Verifica o CVV (se preenchido)
+            if limpos.get("cvv") and not (
+                limpos["cvv"].isdigit() and 3 <= len(limpos["cvv"]) <= 4
+            ):
+                raise ValueError("O CVV deve ter 3 ou 4 dígitos.")
+
+        # Retorna os dados validados e normalizados
+        return limpos
+
+    # Converte um nome técnico de campo num rótulo amigável para mensagens
+    @staticmethod
+    def _rotulo_amigavel_campo(campo: str) -> str:
+        """Converte nome técnico do campo em texto amigável para o usuário."""
+        mapa = {
+            "titulo": "Título",
+            "login": "Usuário/E-mail",
+            "senha": "Senha",
+            "numero": "Número",
+            "validade": "Validade",
+            "cvv": "CVV",
+            "titular": "Titular",
+            "bandeira": "Bandeira",
+            "cor": "Cor",
+            "tipo_documento": "Tipo do documento",
+            "nome_titular": "Nome do titular",
+            "orgao_emissor": "Órgão emissor",
+            "data_emissao": "Data de emissão",
+            "conteudo": "Conteúdo",
+            "tipo_seguranca": "Tipo de segurança",
+            "chave": "Chave de licença",
+            "email_licenca": "E-mail da licença",
+            "data_compra": "Data de compra",
+            "observacao": "Observação",
+        }
+        # Retorna o rótulo se existir; senão, devolve o próprio nome técnico
+        return mapa.get(campo, campo)
 
     # Verifica se o usuário está logado; se não estiver, impede a operação
     def _garantir_sessao(self) -> None:
         """Garante que exista sessão autenticada antes de operar no cofre."""
-        # Se não está autenticado, lança um erro de permissão
         if not self.esta_autenticado():
             raise PermissionError("É necessário fazer login para acessar o cofre.")
 
-    # Garante que a estrutura interna do cofre tenha os campos mínimos necessários
+    # Garante que a estrutura interna do cofre tenha os campos mínimos
     def _normalizar_estrutura_cofre(self) -> None:
         """Normaliza estrutura interna mínima do cofre descriptografado."""
-        # Se não existe a lista de credenciais, cria uma vazia
+        # Se não existe a lista de itens, cria uma vazia
         self._dados_cofre.setdefault("credenciais", [])
         # Se não existem metadados, cria com as datas atuais
         self._dados_cofre.setdefault(
@@ -1119,43 +1418,43 @@ class ServicoCofre:
                 "atualizado_em": self._agora_iso(),
             },
         )
+        # Normaliza cada item: garante campo "tipo", "favorito", "titulo"
+        for item in self._dados_cofre["credenciais"]:
+            # Se não tem tipo, assume "senha"
+            if "tipo" not in item:
+                item["tipo"] = "senha"
+            # Se não tem "titulo" mas tem "servico" (campo legado), copia
+            if "titulo" not in item and "servico" in item:
+                item["titulo"] = item["servico"]
+            # Garante campo "favorito"
+            item.setdefault("favorito", False)
 
     # Carrega o conteúdo de um keyfile do disco e retorna o segredo normalizado
     def _carregar_segredo_keyfile(self, caminho_keyfile: str) -> bytes:
         """Carrega keyfile do disco e devolve seu segredo normalizado."""
-        # Converte e resolve o caminho do arquivo
         caminho = Path(caminho_keyfile).expanduser().resolve()
-        # Verifica se o arquivo existe
         if not caminho.exists():
             raise ValueError("O keyfile informado não foi encontrado.")
-        # Verifica se é realmente um arquivo (e não uma pasta)
         if not caminho.is_file():
             raise ValueError("O caminho informado para keyfile não é um arquivo válido.")
-        # Lê o conteúdo do arquivo e normaliza para uso como segredo
         return normalizar_segredo_keyfile(caminho.read_bytes())
 
     # Verifica se o arquivo do cofre usa o formato antigo (menos seguro)
     def _arquivo_usa_formato_legado(self, dados_arquivo: dict[str, Any]) -> bool:
         """Detecta se o arquivo ainda usa o formato antigo baseado em Fernet."""
-        # Se a versão do arquivo é menor que a atual, é formato legado
         if int(dados_arquivo.get("versao", 1)) < VERSAO_COFRE_ATUAL:
             return True
-        # Se o algoritmo de KDF não é Argon2id, é formato legado
         if str(dados_arquivo.get("kdf", {}).get("algoritmo", "")).lower() != "argon2id":
             return True
-        # Se os dados criptografados não são um dicionário, é formato legado
         return not isinstance(dados_arquivo.get("dados_cofre_criptografados"), dict)
 
-    # Carrega o arquivo do cofre e verifica se todos os campos obrigatórios estão presentes
+    # Carrega o arquivo do cofre e valida se todos os campos obrigatórios estão presentes
     def _carregar_arquivo_obrigatorio(self) -> dict[str, Any]:
         """Carrega arquivo persistido e valida campos críticos obrigatórios."""
-        # Carrega o arquivo do disco
         dados_arquivo = self._armazenamento.carregar()
-        # Se não conseguiu carregar, o cofre não existe
         if dados_arquivo is None:
             raise FileNotFoundError("Cofre ainda não foi inicializado.")
 
-        # Lista de campos que o arquivo PRECISA ter para ser válido
         campos_obrigatorios = [
             "kdf",
             "verificador_senha",
@@ -1163,112 +1462,80 @@ class ServicoCofre:
             "controle_acesso",
             "politica_acesso",
         ]
-        # Verifica quais campos estão faltando
         faltantes = [campo for campo in campos_obrigatorios if campo not in dados_arquivo]
-        # Se falta algum campo, mostra erro informando quais estão faltando
         if faltantes:
             raise ValueError(f"Arquivo do cofre incompleto: faltando {', '.join(faltantes)}.")
 
-        # Retorna os dados do arquivo validados
         return dados_arquivo
 
-    # @staticmethod indica que este método não precisa de uma instância da classe para funcionar
     # Carrega e valida um arquivo de exportação de credenciais
     @staticmethod
     def _carregar_pacote_exportacao(caminho_origem: str | Path) -> dict[str, Any]:
         """Carrega e valida minimamente um pacote de exportação de credenciais."""
-        # Converte e resolve o caminho do arquivo
         caminho = Path(caminho_origem).expanduser().resolve()
-        # Verifica se o arquivo existe
         if not caminho.exists():
             raise ValueError("O arquivo de importação não foi encontrado.")
-        # Verifica se é realmente um arquivo
         if not caminho.is_file():
             raise ValueError("O caminho informado para importação não é um arquivo válido.")
 
-        # Tenta abrir e ler o arquivo como JSON
         try:
-            # Abre o arquivo para leitura com codificação UTF-8
             with caminho.open("r", encoding="utf-8") as arquivo:
-                # Converte o conteúdo JSON em um dicionário Python
                 pacote = json.load(arquivo)
-        # Se o arquivo não é um JSON válido, mostra erro
         except json.JSONDecodeError as exc:
             raise ValueError("O arquivo de importação não é um JSON válido.") from exc
 
-        # Verifica se o conteúdo carregado é um dicionário
         if not isinstance(pacote, dict):
             raise ValueError("O pacote de importação possui estrutura inválida.")
 
-        # Verifica se o tipo do pacote é uma exportação válida do cofre
         if pacote.get("tipo") != "exportacao_credenciais_cofre_seguro":
             raise ValueError("O arquivo selecionado não é uma exportação válida do cofre.")
 
-        # Lista de campos obrigatórios no pacote de exportação
         campos_obrigatorios = [
             "kdf",
             "verificador_senha",
             "dados_exportados_criptografados",
         ]
-        # Verifica quais campos estão faltando
         faltantes = [campo for campo in campos_obrigatorios if campo not in pacote]
-        # Se falta algum campo, mostra erro
         if faltantes:
             raise ValueError(
                 f"Pacote de importação incompleto: faltando {', '.join(faltantes)}."
             )
 
-        # Retorna o pacote validado
         return pacote
 
-    # Obtém as regras de política de acesso, preenchendo com valores padrão se necessário
+    # Obtém as regras de política de acesso, preenchendo padrões quando ausentes
     def _politica_acesso(self, dados_arquivo: dict[str, Any]) -> dict[str, int]:
         """Resolve política de acesso com valores padrão em caso de ausência."""
-        # Pega a política salva no arquivo (ou dicionário vazio se não existir)
         politica_salva = dados_arquivo.get("politica_acesso", {})
-        # Cria um novo dicionário para a política resolvida
         politica: dict[str, int] = {}
-        # Para cada regra padrão, pega o valor salvo ou usa o padrão
         for chave, valor_padrao in self.POLITICA_PADRAO.items():
             valor = politica_salva.get(chave, valor_padrao)
             politica[chave] = int(valor)
-        # Atualiza a política no arquivo
         dados_arquivo["politica_acesso"] = politica
-        # Retorna a política completa
         return politica
 
-    # @staticmethod indica que este método não precisa de uma instância da classe
     # Converte o nome do algoritmo KDF para um texto amigável para mostrar na tela
     @staticmethod
     def _rotulo_kdf(kdf: dict[str, Any]) -> str:
         """Traduz configuração do KDF para rótulo da interface."""
-        # Pega o nome do algoritmo em minúsculas
         algoritmo = str(kdf.get("algoritmo", "scrypt")).lower()
-        # Se é Argon2id (formato moderno), mostra o nome e a quantidade de memória usada
         if algoritmo == "argon2id":
             memoria_mb = int(kdf.get("memory_cost", 0)) // 1024
             return f"Argon2id ({memoria_mb} MB)"
-        # Se é qualquer outro, mostra como "scrypt (legado)" (formato antigo)
         return "scrypt (legado)"
 
-    # @staticmethod indica que este método não precisa de uma instância da classe
     # Converte o nome do algoritmo de criptografia para um texto amigável para a tela
     @staticmethod
     def _rotulo_cifra(carga_criptografada: Any) -> str:
         """Traduz a cifra em uso para rótulo da interface."""
-        # Se os dados criptografados são um dicionário, verifica o algoritmo
         if isinstance(carga_criptografada, dict):
             algoritmo = str(carga_criptografada.get("algoritmo", "")).lower()
-            # Se é AES-256-GCM (formato moderno), mostra o nome
             if algoritmo == "aes-256-gcm":
                 return "AES-256-GCM"
-        # Se não é formato moderno, mostra como "Fernet (legado)" (formato antigo)
         return "Fernet (legado)"
 
-    # @staticmethod indica que este método não precisa de uma instância da classe
-    # Retorna a data e hora atuais no formato ISO padrão internacional
+    # Retorna a data e hora atuais no formato ISO padrão
     @staticmethod
     def _agora_iso() -> str:
         """Retorna timestamp ISO local com precisão de segundos."""
-        # Pega a hora atual em UTC, converte para o fuso local, e formata como texto ISO
         return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
