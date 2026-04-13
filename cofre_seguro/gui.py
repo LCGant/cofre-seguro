@@ -1608,9 +1608,8 @@ class TelaPrincipal(tk.Frame):
 
     # Área rolável com os cards
     def _construir_area_cards(self, pai: tk.Widget) -> None:
-        """Cria a área rolável de cards dos itens."""
+        """Cria a área rolável de cards dos itens com scrollbar auto-hide."""
         wrapper = tk.Frame(pai, bg=BG_BASE, padx=30)
-        # pady zero no topo, 20 embaixo (dado via pack/grid, não no construtor)
         wrapper.grid(row=2, column=0, sticky=NSEW)
         wrapper.rowconfigure(0, weight=1)
         wrapper.columnconfigure(0, weight=1)
@@ -1620,26 +1619,63 @@ class TelaPrincipal(tk.Frame):
         )
         self._canvas.grid(row=0, column=0, sticky=NSEW)
 
-        scroll_y = tb.Scrollbar(wrapper, orient="vertical", command=self._canvas.yview)
-        scroll_y.grid(row=0, column=1, sticky=NS)
-        self._canvas.configure(yscrollcommand=scroll_y.set)
+        # Scrollbar fica guardada mas começa ESCONDIDA
+        # Só aparece quando o conteúdo for maior que o canvas
+        self._scroll_y = tb.Scrollbar(
+            wrapper, orient="vertical", command=self._canvas.yview,
+        )
+        # NÃO faz grid agora — só aparece sob demanda em _atualizar_visibilidade_scroll
+        self._scroll_wrapper = wrapper
+        self._canvas.configure(yscrollcommand=self._scrollbar_set)
 
         self._frame_cards = tk.Frame(self._canvas, bg=BG_BASE)
         self._janela_cards = self._canvas.create_window(
             (0, 0), window=self._frame_cards, anchor=tk.NW,
         )
 
-        self._frame_cards.bind(
-            "<Configure>",
-            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")),
-        )
+        # Quando o conteúdo muda de tamanho, recalcula scrollregion + visibilidade
+        self._frame_cards.bind("<Configure>", self._atualizar_scroll)
         self._canvas.bind(
             "<Configure>",
-            lambda e: self._canvas.itemconfigure(self._janela_cards, width=e.width),
+            lambda e: (
+                self._canvas.itemconfigure(self._janela_cards, width=e.width),
+                self._atualizar_visibilidade_scroll(),
+            ),
         )
-        # Liga a rolagem com rodinha e arrasto com botão do meio
+        # Liga rolagem com rodinha e arrasto com botão do meio
         _ligar_scroll_roda(self._canvas)
         _ligar_scroll_drag(self._canvas)
+
+    # Atualiza a região rolável e a visibilidade da scrollbar
+    def _atualizar_scroll(self, _evento: Any = None) -> None:
+        """Recalcula a região rolável e mostra/esconde scrollbar conforme necessário."""
+        bbox = self._canvas.bbox("all")
+        if bbox is not None:
+            self._canvas.configure(scrollregion=bbox)
+        # Decide se mostra scrollbar
+        self._atualizar_visibilidade_scroll()
+
+    # Mostra ou esconde a scrollbar conforme o conteúdo precisa rolar
+    def _atualizar_visibilidade_scroll(self) -> None:
+        """Mostra a scrollbar somente quando o conteúdo é maior que o canvas."""
+        bbox = self._canvas.bbox("all")
+        if bbox is None:
+            return
+        altura_conteudo = bbox[3] - bbox[1]
+        altura_canvas = self._canvas.winfo_height()
+        # Se o conteúdo cabe no canvas, esconde a scrollbar; senão mostra
+        if altura_conteudo <= altura_canvas:
+            self._scroll_y.grid_forget()
+        else:
+            self._scroll_y.grid(row=0, column=1, sticky=NS)
+
+    # Wrapper do yscrollcommand que também atualiza visibilidade
+    def _scrollbar_set(self, *args: Any) -> None:
+        """Atualiza o estado da scrollbar e re-avalia se ela deve aparecer."""
+        self._scroll_y.set(*args)
+        # Quando o canvas muda a posição, vê se ainda precisa de scrollbar
+        # (ex: ao redimensionar a janela)
+        self._atualizar_visibilidade_scroll()
 
     # Põe o foco no campo de busca (usado pelo atalho Ctrl+F)
     def _focar_busca(self) -> None:
@@ -1695,6 +1731,8 @@ class TelaPrincipal(tk.Frame):
 
         if not itens:
             self._mostrar_estado_vazio()
+            # Mesmo no estado vazio, reseta scroll e atualiza layout
+            self._resetar_scroll_e_layout()
             return
 
         # Grade de 3 colunas
@@ -1705,6 +1743,26 @@ class TelaPrincipal(tk.Frame):
             linha = i // 3
             coluna = i % 3
             self._criar_card_item(item, linha, coluna)
+
+        # Após renderizar tudo, garante que:
+        #  1. A posição de scroll volta para o topo (evita cards "sumidos"
+        #     quando um filtro novo tem menos cards e você estava scrollado)
+        #  2. O tamanho da scrollregion + visibilidade da scrollbar é recalculado
+        #     com base no NOVO conteúdo, e não no anterior
+        self._resetar_scroll_e_layout()
+
+    # Garante que a posição de scroll e a scrollbar estão consistentes
+    # com o conteúdo recém-renderizado. Chamado depois de cada troca de filtro.
+    def _resetar_scroll_e_layout(self) -> None:
+        """Reseta scroll para o topo e recalcula scrollregion/visibilidade."""
+        # update_idletasks força o tk a calcular tamanhos pendentes ANTES
+        # de medirmos bbox e altura do canvas. Sem isso, na primeira render
+        # da tela os cards podem ficar com posição/scroll inconsistentes.
+        self._frame_cards.update_idletasks()
+        # Volta ao topo da lista (UX consistente em qualquer troca de filtro)
+        self._canvas.yview_moveto(0.0)
+        # Recalcula região rolável e mostra/esconde scrollbar conforme necessário
+        self._atualizar_scroll()
 
     # Atualiza contadores (sidebar + dashboard)
     def _atualizar_contadores(self) -> None:
@@ -1809,116 +1867,315 @@ class TelaPrincipal(tk.Frame):
 
     # Estado vazio
     def _mostrar_estado_vazio(self) -> None:
-        """Desenha mensagem amigável quando não há itens para mostrar."""
-        vazio = tk.Frame(self._frame_cards, bg=BG_BASE, padx=60, pady=80)
+        """Desenha estado vazio rico com ícone grande, dicas e botão de ação."""
+        vazio = tk.Frame(self._frame_cards, bg=BG_BASE, padx=40, pady=40)
         vazio.pack(fill=BOTH, expand=True)
+        vazio.columnconfigure(0, weight=1)
 
-        if self.var_busca.get().strip():
+        # Sugestões de uso por tipo (educacional, faz o estado vazio virar guia rapido)
+        sugestoes_por_tipo: dict[str, list[str]] = {
+            "senha": [
+                "📧  Contas de email (Gmail, Outlook)",
+                "🎬  Streaming (Netflix, Spotify)",
+                "🏦  Bancos e fintechs",
+                "🛒  Lojas online",
+            ],
+            "cartao": [
+                "💳  Cartão de crédito principal",
+                "💵  Cartão de débito",
+                "🍔  Vale-refeição / vale-alimentação",
+                "✈️  Cartão de viagem internacional",
+            ],
+            "documento": [
+                "🪪  RG e CPF",
+                "🚗  CNH (Carteira de Habilitação)",
+                "🛂  Passaporte",
+                "🗳️  Título de eleitor",
+            ],
+            "nota": [
+                "🔐  Frase semente de carteira cripto",
+                "❓  Respostas de perguntas de segurança",
+                "🔑  PINs de cartão",
+                "📝  Códigos de backup 2FA",
+            ],
+            "wifi": [
+                "🏠  Rede de casa",
+                "💼  Wi-Fi do trabalho",
+                "👨‍👩‍👧  Wi-Fi de familiares",
+                "☕  Cafés / hotéis frequentes",
+            ],
+            "licenca": [
+                "🪟  Windows",
+                "📊  Microsoft Office",
+                "🎮  Steam, Epic, jogos",
+                "🛠️  Software profissional (Adobe, JetBrains)",
+            ],
+        }
+
+        # Determina contexto e prepara variáveis
+        tem_busca = bool(self.var_busca.get().strip())
+        is_tipo = self._filtro_atual in TIPOS_SUPORTADOS
+
+        if tem_busca:
             emoji = "🔍"
+            cor_destaque = ACCENT_INFO
             titulo = "Nenhum resultado"
-            desc = "Tente um termo diferente na busca."
+            desc = f"Não achei nada para “{self.var_busca.get().strip()}”.\nTente outro termo ou limpe a busca."
+            sugestoes = []
+            mostrar_botao = False
         elif self._filtro_atual == "favoritos":
             emoji = "⭐"
-            titulo = "Sem favoritos ainda"
-            desc = "Clique na estrela de um item para marcá-lo como favorito."
-        elif self._filtro_atual in TIPOS_SUPORTADOS:
+            cor_destaque = ACCENT_WARNING
+            titulo = "Nenhum favorito ainda"
+            desc = "Clique na ☆ estrela de qualquer item\npara marcá-lo como favorito."
+            sugestoes = []
+            mostrar_botao = False
+        elif is_tipo:
             meta = METADADOS_TIPO[self._filtro_atual]
             emoji = meta["icone"]
-            titulo = f"Nenhum item em {meta['rotulo']}"
-            desc = "Clique em 'Novo item' para adicionar o primeiro."
+            cor_destaque = CORES_TIPO[self._filtro_atual]
+            titulo = f"Nenhum {meta['rotulo'].rstrip('s').lower()} cadastrado"
+            desc = "Que tal começar agora? Aqui estão algumas\nideias do que você pode guardar:"
+            sugestoes = sugestoes_por_tipo.get(self._filtro_atual, [])
+            mostrar_botao = True
         else:
-            emoji = "📭"
-            titulo = "Cofre vazio"
-            desc = "Clique em 'Novo item' na barra lateral para começar."
+            emoji = "🗄️"
+            cor_destaque = ACCENT_PRIMARY
+            titulo = "Seu cofre está vazio"
+            desc = "Comece adicionando seu primeiro item:\nsenha, cartão, documento e mais."
+            sugestoes = []
+            mostrar_botao = True
 
-        criar_label(
-            vazio, emoji, fg=TEXT_MUTED, bg=BG_BASE,
-            fonte=("Segoe UI Emoji", 56),
-        ).pack(pady=(20, 10))
-        criar_label(
-            vazio, titulo, fg=TEXT_PRIMARY, bg=BG_BASE,
-            fonte=(FONTE_PADRAO, 16, "bold"),
+        # Espaço acima (centralização vertical)
+        tk.Frame(vazio, bg=BG_BASE, height=20).grid(row=0, column=0)
+
+        # Container central
+        centro = tk.Frame(vazio, bg=BG_BASE)
+        centro.grid(row=1, column=0, pady=20)
+
+        # "Badge" circular com ícone gigante na cor do tipo
+        # Usamos um Frame com fundo escuro elevado pra simular o badge
+        badge = tk.Frame(
+            centro, bg=BG_SURFACE,
+            highlightbackground=cor_destaque, highlightthickness=2,
+            width=120, height=120,
+        )
+        badge.pack(pady=(0, 20))
+        badge.pack_propagate(False)  # Mantém o tamanho fixo do badge
+
+        tk.Label(
+            badge, text=emoji,
+            bg=BG_SURFACE, fg=cor_destaque,
+            font=("Segoe UI Emoji", 56),
+        ).place(relx=0.5, rely=0.5, anchor=CENTER)
+
+        # Título grande
+        tk.Label(
+            centro, text=titulo,
+            bg=BG_BASE, fg=TEXT_PRIMARY,
+            font=(FONTE_PADRAO, 18, "bold"),
         ).pack()
-        criar_label(
-            vazio, desc, fg=TEXT_SECONDARY, bg=BG_BASE,
-            fonte=(FONTE_PADRAO, 11),
-        ).pack(pady=(6, 0))
+
+        # Descrição centralizada
+        tk.Label(
+            centro, text=desc,
+            bg=BG_BASE, fg=TEXT_SECONDARY,
+            font=(FONTE_PADRAO, 11),
+            justify=CENTER,
+        ).pack(pady=(8, 0))
+
+        # Lista de sugestões (se houver) — caixa elevada com bordas sutis
+        if sugestoes:
+            caixa_dicas = tk.Frame(
+                centro, bg=BG_SURFACE,
+                highlightbackground=BORDER_MUTED, highlightthickness=1,
+            )
+            caixa_dicas.pack(pady=(20, 0), fill=X, padx=20)
+
+            inner = tk.Frame(caixa_dicas, bg=BG_SURFACE, padx=20, pady=14)
+            inner.pack(fill=X)
+
+            tk.Label(
+                inner, text="EXEMPLOS",
+                bg=BG_SURFACE, fg=TEXT_MUTED,
+                font=(FONTE_PADRAO, 9, "bold"),
+            ).pack(anchor=W, pady=(0, 8))
+
+            for sug in sugestoes:
+                tk.Label(
+                    inner, text=sug,
+                    bg=BG_SURFACE, fg=TEXT_PRIMARY,
+                    font=(FONTE_PADRAO, 11), anchor=W,
+                ).pack(anchor=W, pady=2, fill=X)
+
+        # Botão grande de ação (só pra tipos válidos / cofre vazio)
+        if mostrar_botao:
+            # O ttkbootstrap Button precisa de bootstyle por nome (string ou tupla)
+            # Usamos PRIMARY que combina com qualquer cor de tipo
+            tb.Button(
+                centro,
+                text="  +   Adicionar agora",
+                command=self._criar_novo_item,
+                bootstyle=PRIMARY,
+            ).pack(pady=(20, 0), ipadx=20, ipady=8)
+
+            # Dica do atalho de teclado abaixo do botão
+            tk.Label(
+                centro, text="ou pressione  Ctrl + N",
+                bg=BG_BASE, fg=TEXT_MUTED,
+                font=(FONTE_PADRAO, 9),
+            ).pack(pady=(8, 0))
 
     # Card visual moderno de cada item
     def _criar_card_item(self, item: dict[str, Any], linha: int, coluna: int) -> None:
-        """Desenha um card visual moderno com barra de acento e hover."""
+        """Desenha um card visual rico com badge colorido, ações rápidas e hover."""
         tipo = item.get("tipo", "senha")
         meta = METADADOS_TIPO.get(tipo, METADADOS_TIPO["senha"])
         cor_tipo = CORES_TIPO.get(tipo, ACCENT_INFO)
         favorito = bool(item.get("favorito", False))
 
-        # Card externo (recebe a borda sutil)
+        # Card externo com borda sutil
         card = tk.Frame(
             self._frame_cards, bg=BG_SURFACE, cursor="hand2",
             highlightbackground=BORDER_MUTED, highlightthickness=1,
         )
-        card.grid(row=linha, column=coluna, padx=8, pady=8, sticky=NSEW, ipady=0)
+        card.grid(row=linha, column=coluna, padx=8, pady=8, sticky=NSEW)
 
-        # Barra de acento à esquerda (4px da cor do tipo)
-        barra = tk.Frame(card, bg=cor_tipo, width=4)
+        # Barra lateral colorida (5px) — identidade visual do tipo
+        barra = tk.Frame(card, bg=cor_tipo, width=5)
         barra.pack(side=LEFT, fill=Y)
 
         # Conteúdo principal do card
         conteudo = tk.Frame(card, bg=BG_SURFACE, padx=16, pady=14)
         conteudo.pack(side=LEFT, fill=BOTH, expand=True)
 
-        # Linha 1: ícone + título + estrela
+        # ---- LINHA 1: ícone + título + estrela ----
         linha1 = tk.Frame(conteudo, bg=BG_SURFACE)
         linha1.pack(fill=X)
 
-        lbl_icone = tk.Label(
-            linha1, text=meta["icone"], bg=BG_SURFACE, fg=cor_tipo,
-            font=("Segoe UI Emoji", 20),
+        # "Ícone com fundo colorido" — quadradinho com a cor do tipo no fundo
+        # Mais visível e elegante que o ícone solto
+        icone_box = tk.Frame(
+            linha1, bg=BG_ELEVATED,
+            width=36, height=36,
+            highlightbackground=cor_tipo, highlightthickness=1,
         )
-        lbl_icone.pack(side=LEFT)
+        icone_box.pack(side=LEFT)
+        icone_box.pack_propagate(False)
+
+        lbl_icone = tk.Label(
+            icone_box, text=meta["icone"],
+            bg=BG_ELEVATED, fg=cor_tipo,
+            font=("Segoe UI Emoji", 16),
+        )
+        lbl_icone.place(relx=0.5, rely=0.5, anchor=CENTER)
+
+        # Bloco de texto (título + tipo)
+        bloco_texto = tk.Frame(linha1, bg=BG_SURFACE)
+        bloco_texto.pack(side=LEFT, padx=(12, 0), fill=X, expand=True)
 
         lbl_titulo = tk.Label(
-            linha1, text=item.get("titulo", "(sem título)"),
+            bloco_texto, text=item.get("titulo", "(sem título)"),
             bg=BG_SURFACE, fg=TEXT_PRIMARY,
             font=(FONTE_PADRAO, 12, "bold"), anchor=W,
         )
-        lbl_titulo.pack(side=LEFT, padx=(10, 0), fill=X, expand=True)
+        lbl_titulo.pack(anchor=W, fill=X)
 
-        # Estrela de favorito (clicável sem abrir detalhes)
+        # Rótulo do tipo logo abaixo do título (em vez do chip lá embaixo)
+        lbl_tipo = tk.Label(
+            bloco_texto, text=meta["rotulo"],
+            bg=BG_SURFACE, fg=cor_tipo,
+            font=(FONTE_PADRAO, 9, "bold"), anchor=W,
+        )
+        lbl_tipo.pack(anchor=W)
+
+        # Estrela de favorito (clicável)
         cor_estrela = ACCENT_WARNING if favorito else TEXT_MUTED
         lbl_fav = tk.Label(
             linha1, text="★" if favorito else "☆",
             bg=BG_SURFACE, fg=cor_estrela,
-            font=(FONTE_PADRAO, 14), cursor="hand2",
+            font=(FONTE_PADRAO, 16), cursor="hand2",
         )
         lbl_fav.pack(side=RIGHT, padx=(6, 0))
 
-        # Subtítulo (info específica do tipo)
+        # ---- DIVISOR sutil ----
+        divisor = tk.Frame(conteudo, bg=BORDER_MUTED, height=1)
+        divisor.pack(fill=X, pady=(12, 10))
+
+        # ---- LINHA 2: subtítulo + ação rápida ----
+        linha2 = tk.Frame(conteudo, bg=BG_SURFACE)
+        linha2.pack(fill=X)
+
         subtitulo = self._subtitulo_para_tipo(item)
+        # Decide qual valor pode ser copiado direto pela ação rápida
+        valor_copia_rapida = self._valor_copia_rapida(item)
+        rotulo_acao = self._rotulo_acao_rapida(tipo)
+
         if subtitulo:
+            # "Label" pequeno acima do valor (ex: "USUÁRIO", "SSID", "TIPO")
+            rotulo_subtitulo = self._rotulo_subtitulo_para_tipo(tipo)
+            if rotulo_subtitulo:
+                lbl_rot_sub = tk.Label(
+                    linha2, text=rotulo_subtitulo,
+                    bg=BG_SURFACE, fg=TEXT_MUTED,
+                    font=(FONTE_PADRAO, 8, "bold"), anchor=W,
+                )
+                lbl_rot_sub.pack(anchor=W)
+            else:
+                lbl_rot_sub = None
+
+            # Linha do valor + botão de copiar
+            linha_valor = tk.Frame(linha2, bg=BG_SURFACE)
+            linha_valor.pack(fill=X, pady=(2, 0))
+
             lbl_sub = tk.Label(
-                conteudo, text=subtitulo,
-                bg=BG_SURFACE, fg=TEXT_SECONDARY,
-                font=(FONTE_MONO if tipo in ("cartao", "wifi") else FONTE_PADRAO, 10),
+                linha_valor, text=subtitulo,
+                bg=BG_SURFACE, fg=TEXT_PRIMARY,
+                font=(FONTE_MONO if tipo in ("cartao", "wifi", "documento") else FONTE_PADRAO, 10),
                 anchor=W,
             )
-            lbl_sub.pack(fill=X, pady=(10, 0))
+            lbl_sub.pack(side=LEFT, fill=X, expand=True)
         else:
             lbl_sub = None
+            lbl_rot_sub = None
+            linha_valor = None
 
-        # Chip do tipo (tag colorida pequena)
-        chip_wrapper = tk.Frame(conteudo, bg=BG_SURFACE)
-        chip_wrapper.pack(fill=X, pady=(14, 0))
+        # Botão de ação rápida (copiar) — só se tem algo útil para copiar
+        if valor_copia_rapida:
+            def copiar_acao(_evento: Any = None, v: str = valor_copia_rapida) -> None:
+                """Copia o valor da ação rápida para o clipboard com feedback."""
+                self.clipboard_clear()
+                self.clipboard_append(v)
+                # Limpa clipboard em 30s por segurança
+                self.after(30000, lambda: self._limpar_clipboard_se(v))
+                # Toast visual: muda o texto do botão temporariamente
+                btn_acao.configure(text="✓ copiado", fg=ACCENT_SUCCESS)
+                self.after(1500, lambda: btn_acao.configure(
+                    text=f"📋  {rotulo_acao}", fg=cor_tipo,
+                ))
 
-        chip = tk.Label(
-            chip_wrapper, text=meta["rotulo"].upper(),
-            bg=BG_SURFACE, fg=cor_tipo,
-            font=(FONTE_PADRAO, 8, "bold"), padx=8, pady=3,
-            highlightbackground=cor_tipo, highlightthickness=1,
-        )
-        chip.pack(side=LEFT)
+            btn_acao = tk.Label(
+                linha2 if not linha_valor else linha_valor,
+                text=f"📋  {rotulo_acao}",
+                bg=BG_SURFACE, fg=cor_tipo,
+                font=(FONTE_PADRAO, 9), cursor="hand2",
+            )
+            btn_acao.pack(side=RIGHT, padx=(8, 0))
+            btn_acao.bind("<Button-1>", copiar_acao)
+        else:
+            btn_acao = None
 
-        # Liga clique para abrir detalhes em todos os filhos (exceto estrela)
+        # ---- Lista de widgets que devem TODOS reagir ao clique e hover ----
+        widgets_card = [card, conteudo, linha1, icone_box, lbl_icone,
+                        bloco_texto, lbl_titulo, lbl_tipo, divisor, linha2]
+        if lbl_sub is not None:
+            widgets_card.append(lbl_sub)
+        if linha_valor is not None:
+            widgets_card.append(linha_valor)
+        if lbl_rot_sub is not None:
+            widgets_card.append(lbl_rot_sub)
+
+        # ---- Callbacks de interação ----
         def abrir_detalhes(_evento: Any = None, i: dict = item) -> None:
             self._abrir_detalhes(i)
 
@@ -1926,44 +2183,102 @@ class TelaPrincipal(tk.Frame):
             self._alternar_favorito(i)
 
         def on_enter(_evento: Any = None) -> None:
-            """Efeito de hover no card: fundo mais claro + borda destacada."""
+            """Hover: clareia o fundo do card inteiro e destaca a borda."""
             card.configure(bg=BG_SURFACE_HOVER, highlightbackground=cor_tipo)
             conteudo.configure(bg=BG_SURFACE_HOVER)
-            linha1.configure(bg=BG_SURFACE_HOVER)
-            lbl_icone.configure(bg=BG_SURFACE_HOVER)
-            lbl_titulo.configure(bg=BG_SURFACE_HOVER)
+            for w in widgets_card[2:]:  # pula card e conteudo (ja atualizados)
+                try:
+                    w.configure(bg=BG_SURFACE_HOVER)
+                except tk.TclError:
+                    pass
+            # Divisor mantém visual diferente
+            divisor.configure(bg=BORDER)
             lbl_fav.configure(bg=BG_SURFACE_HOVER)
-            chip_wrapper.configure(bg=BG_SURFACE_HOVER)
-            chip.configure(bg=BG_SURFACE_HOVER)
-            if lbl_sub is not None:
-                lbl_sub.configure(bg=BG_SURFACE_HOVER)
+            if btn_acao is not None:
+                btn_acao.configure(bg=BG_SURFACE_HOVER)
 
         def on_leave(_evento: Any = None) -> None:
-            """Remove o hover e volta às cores normais."""
+            """Sai do hover: restaura cores normais."""
             card.configure(bg=BG_SURFACE, highlightbackground=BORDER_MUTED)
             conteudo.configure(bg=BG_SURFACE)
-            linha1.configure(bg=BG_SURFACE)
-            lbl_icone.configure(bg=BG_SURFACE)
-            lbl_titulo.configure(bg=BG_SURFACE)
+            for w in widgets_card[2:]:
+                try:
+                    w.configure(bg=BG_SURFACE)
+                except tk.TclError:
+                    pass
+            divisor.configure(bg=BORDER_MUTED)
             lbl_fav.configure(bg=BG_SURFACE)
-            chip_wrapper.configure(bg=BG_SURFACE)
-            chip.configure(bg=BG_SURFACE)
-            if lbl_sub is not None:
-                lbl_sub.configure(bg=BG_SURFACE)
+            if btn_acao is not None:
+                btn_acao.configure(bg=BG_SURFACE)
+            # icone_box mantém fundo elevado mesmo no hover (visual de "chip")
+            icone_box.configure(bg=BG_ELEVATED)
+            lbl_icone.configure(bg=BG_ELEVATED)
 
-        # Aplica binds a todos os widgets do card (exceto a estrela, que tem seu próprio)
-        widgets_card = [card, conteudo, linha1, lbl_icone, lbl_titulo, chip_wrapper, chip]
-        if lbl_sub is not None:
-            widgets_card.append(lbl_sub)
+        # Liga clique pra abrir detalhes (em quase todo o card)
         for w in widgets_card:
             w.bind("<Button-1>", abrir_detalhes)
             w.bind("<Enter>", on_enter)
             w.bind("<Leave>", on_leave)
 
-        # A estrela tem clique próprio (alterna favorito, não abre detalhes)
+        # Estrela tem ação própria (não abre detalhes)
         lbl_fav.bind("<Button-1>", alternar_fav)
         lbl_fav.bind("<Enter>", on_enter)
         lbl_fav.bind("<Leave>", on_leave)
+
+        # O ícone box mantém seu fundo "elevado" mesmo quando o card está em hover
+        # (passa o evento adiante mas não muda a cor)
+        icone_box.configure(bg=BG_ELEVATED)
+        lbl_icone.configure(bg=BG_ELEVATED)
+
+    # Helper: limpa o clipboard se o conteúdo ainda for o que copiamos
+    def _limpar_clipboard_se(self, texto_original: str) -> None:
+        """Limpa o clipboard 30s após cópia, se o conteúdo não foi alterado."""
+        try:
+            atual = self.clipboard_get()
+        except tk.TclError:
+            return
+        if atual == texto_original:
+            self.clipboard_clear()
+
+    # Rótulo da ação rápida do card (botão "📋 copiar X")
+    def _rotulo_acao_rapida(self, tipo: str) -> str:
+        """Retorna o nome do campo que o botão de copiar rápido pega."""
+        return {
+            "senha": "copiar usuário",
+            "cartao": "copiar bandeira",
+            "documento": "copiar tipo",
+            "nota": "",
+            "wifi": "copiar SSID",
+            "licenca": "copiar e-mail",
+        }.get(tipo, "")
+
+    # Valor a copiar pela ação rápida do card (não é sensível, OK mostrar/copiar)
+    def _valor_copia_rapida(self, item: dict[str, Any]) -> str:
+        """Retorna o valor que o botão de copiar rápido do card vai usar."""
+        tipo = item.get("tipo", "senha")
+        if tipo == "senha":
+            return str(item.get("login", ""))
+        if tipo == "cartao":
+            return str(item.get("bandeira", ""))
+        if tipo == "documento":
+            return str(item.get("tipo_documento", ""))
+        if tipo == "wifi":
+            return str(item.get("titulo", ""))
+        if tipo == "licenca":
+            return str(item.get("email_licenca", ""))
+        return ""
+
+    # Rótulo pequeno (uppercase) acima do subtítulo dentro do card
+    def _rotulo_subtitulo_para_tipo(self, tipo: str) -> str:
+        """Devolve o rótulo (caps) do campo mostrado no subtítulo do card."""
+        return {
+            "senha": "USUÁRIO",
+            "cartao": "BANDEIRA",
+            "documento": "TIPO",
+            "nota": "",
+            "wifi": "SSID",
+            "licenca": "PROTEGIDO",
+        }.get(tipo, "")
 
     # Gera subtítulo informativo do card por tipo
     def _subtitulo_para_tipo(self, item: dict[str, Any]) -> str:
@@ -2710,24 +3025,32 @@ class DialogoDetalhesItem(JanelaModalBase):
             wraplength=420, justify="left",
         ).pack(side=LEFT, fill=X, expand=True)
 
+        # Helper: pega o valor sensivel do item (sessao ja autenticada, sem prompt)
+        def _obter_valor_sensivel() -> str | None:
+            """Busca o valor sensível diretamente do cofre da sessão ativa."""
+            try:
+                item_completo = self.app.servico.obter_item(
+                    self.item_id, incluir_sensiveis=True,
+                )
+            except Exception as exc:
+                messagebox.showerror("Erro", str(exc), parent=self)
+                return None
+            if item_completo is None:
+                messagebox.showerror("Erro", "Item não encontrado.", parent=self)
+                return None
+            return str(item_completo.get(campo, ""))
+
         def revelar() -> None:
-            """Alterna revelar/ocultar pedindo senha se necessário."""
+            """Alterna revelar/ocultar — usa a sessão ativa, sem pedir senha."""
             if estado["revelado"]:
                 var.set(mask_inicial)
                 estado["revelado"] = False
                 btn_r.configure(text="👁")
                 return
-            senha = _pedir_senha_mestra(self, "Autenticar", "Digite sua senha mestra para revelar:")
-            if senha is None:
+            valor = _obter_valor_sensivel()
+            if valor is None:
                 return
-            try:
-                valor = self.app.servico.revelar_campo(self.item_id, campo, senha)
-            except PermissionError:
-                messagebox.showerror("Erro", "Senha mestra incorreta.", parent=self)
-                return
-            except Exception as exc:
-                messagebox.showerror("Erro", str(exc), parent=self)
-                return
+            # Numero de cartao: formata em grupos de 4 digitos pra ler facil
             if campo == "numero" and tipo == "cartao":
                 valor = " ".join(valor[i:i+4] for i in range(0, len(valor), 4))
             var.set(valor)
@@ -2735,22 +3058,14 @@ class DialogoDetalhesItem(JanelaModalBase):
             btn_r.configure(text="🙈")
 
         def copiar() -> None:
-            """Copia o valor sensível após autenticar."""
-            if not estado["revelado"]:
-                senha = _pedir_senha_mestra(self, "Autenticar", "Digite sua senha mestra para copiar:")
-                if senha is None:
-                    return
-                try:
-                    valor = self.app.servico.revelar_campo(self.item_id, campo, senha)
-                except PermissionError:
-                    messagebox.showerror("Erro", "Senha mestra incorreta.", parent=self)
-                    return
-                except Exception as exc:
-                    messagebox.showerror("Erro", str(exc), parent=self)
-                    return
-                self._copiar(valor)
-            else:
+            """Copia o valor sensível direto do cofre — sem pedir senha."""
+            if estado["revelado"]:
                 self._copiar(str(estado.get("valor", "")))
+                return
+            valor = _obter_valor_sensivel()
+            if valor is None:
+                return
+            self._copiar(valor)
 
         btn_r = tb.Button(
             linha, text="👁", command=revelar,

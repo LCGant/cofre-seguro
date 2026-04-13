@@ -141,6 +141,60 @@ Também é possível definir outro caminho para o arquivo do cofre:
 python main.py --arquivo meu_cofre.json
 ```
 
+## Testando o aplicativo
+
+O repositório inclui um **cofre de teste** (`cofre_teste.json`) já populado com **22 itens variados** distribuídos pelos 6 tipos suportados, para que você possa explorar a interface sem precisar cadastrar nada.
+
+### Como abrir
+
+```bash
+python main.py --arquivo cofre_teste.json
+```
+
+**Senha mestra do cofre de teste:**
+
+```
+Teste@2026SenhaForte!
+```
+
+### O que tem dentro
+
+| Tipo        | Qtd | Exemplos                                                     |
+|-------------|:---:|--------------------------------------------------------------|
+| 🔒 Senhas   | 8   | Gmail, Netflix, GitHub, Steam, Discord, Banco do Brasil…    |
+| 💳 Cartões  | 3   | Nubank, Itaú Visa Gold, vale-refeição Sodexo                |
+| 📄 Documentos | 3 | RG, CPF, CNH                                                |
+| 📝 Notas    | 3   | Frase semente Bitcoin, perguntas de segurança, códigos 2FA  |
+| 📶 Wi-Fi    | 2   | Rede de casa, rede do trabalho                              |
+| 🔑 Licenças | 3   | Windows 11 Pro, Office 365 Family, JetBrains All Products   |
+
+Há também **6 itens marcados como favoritos** para testar o filtro ⭐.
+
+### Roteiro sugerido de teste
+
+1. **Dashboard de stats no topo** — clique nos tiles, cada categoria tem cor própria
+2. **Sidebar** — alterne categorias e veja o contador de itens
+3. **Cards** — passe o mouse, abra detalhes clicando, veja o botão `📋 copiar usuário` na linha do subtítulo
+4. **Revelar campo sensível** — abra um item, clique no 👁 ao lado da senha/CVV/chave
+5. **Favoritos** — clique no ⭐ "Favoritos" da sidebar (ou `Ctrl+Shift+F`)
+6. **Busca global** (`Ctrl+F`) — tente termos como `gmail`, `nubank`, `bitcoin`, `2026`
+7. **Atalhos de teclado** (`F1`) — abre a janela completa de atalhos
+8. **Tema** (`Ctrl+T`) — alterna entre escuro e claro
+9. **Estado vazio** — filtre por uma categoria sem itens (ex: apague tudo de uma) e veja o novo design com sugestões
+10. **Mouse do meio + arrastar** — funciona em todas as listas e modais (estilo visualizador de PDF)
+11. **Gerador de senhas** (`Ctrl+G`) — slider de tamanho + toggles de caracteres
+12. **Bloqueio automático** — deixe o app parado por 5 minutos, ele bloqueia sozinho
+
+### Limpeza
+
+Quando terminar de testar, basta apagar o arquivo:
+
+```bash
+rm cofre_teste.json
+```
+
+O cofre real (`cofre_seguro_dados.json`, se existir) **não é tocado** durante os testes.
+
 ## Fluxogramas
 
 Os fluxogramas do projeto estão em:
