@@ -24,7 +24,7 @@ flowchart TD
     K --> L[Buscar e filtrar itens<br/>por tipo ou favoritos]
     K --> M[Cadastrar novo item<br/>senha, cartão, documento,<br/>nota, wifi ou licença]
     K --> N[Visualizar, editar<br/>ou excluir item]
-    K --> O[Revelar ou copiar<br/>campo sensível<br/>com reautenticação]
+    K --> O[Revelar ou copiar<br/>campo sensível<br/>sessão já autenticada]
     K --> P[Configurações:<br/>trocar senha, exportar,<br/>importar, alternar tema]
     K --> Q[Sair ou inatividade<br/>5 min]
 
